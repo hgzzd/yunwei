@@ -1,0 +1,55 @@
+{
+  "imageUrl": "/assets/sprites/idle.png",
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "animations": {
+    "idle": {
+      "imageUrl": "/assets/sprites/idle.png",
+      "frames": [0, 1, 2, 3],
+      "fps": 12,
+      "loop": true
+    },
+    "walking": {
+      "imageUrl": "/assets/sprites/walk.png",
+      "frames": [0, 1, 2, 3, 0, 1, 2, 3],
+      "fps": 12,
+      "loop": true
+    },
+    "running": {
+      "imageUrl": "/assets/sprites/run.png",
+      "frames": [0, 1, 2, 3, 0, 2],
+      "fps": 12,
+      "loop": true
+    },
+    "sitting": {
+      "imageUrl": "/assets/sprites/sit.png",
+      "frames": [0, 1, 2, 3],
+      "fps": 12,
+      "loop": false
+    },
+    "sleeping": {
+      "imageUrl": "/assets/sprites/sleep.png",
+      "frames": [0, 1, 2, 3, 2, 1],
+      "fps": 12,
+      "loop": true
+    },
+    "stretching": {
+      "imageUrl": "/assets/sprites/stretch.png",
+      "frames": [0, 1, 2, 3, 2, 1],
+      "fps": 12,
+      "loop": false
+    },
+    "tumbling": {
+      "imageUrl": "/assets/sprites/tumble.png",
+      "frames": [0, 1, 2, 3, 2, 1, 0, 3],
+      "fps": 12,
+      "loop": false
+    },
+    "dragged": {
+      "imageUrl": "/assets/sprites/dragged.png",
+      "frames": [0, 2],
+      "fps": 12,
+      "loop": true
+    }
+  }
+}

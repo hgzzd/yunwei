@@ -1,0 +1,35 @@
+{
+  "name": "yunweishou-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "云尾兽 Windows 桌面宠物",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "assets:check": "node scripts/validate-assets.mjs",
+    "config:check": "node scripts/validate-config.mjs",
+    "check": "npm run config:check && npm run assets:check && npm run typecheck && npm run test && npm run build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build:windows": "tauri build --target x86_64-pc-windows-msvc --bundles nsis"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@vitest/coverage-v8": "^4.1.10",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

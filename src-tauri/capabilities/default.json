@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core capability for the pet and bubble windows",
+  "windows": ["pet", "bubble"],
+  "permissions": [
+    "core:default"
+  ]
+}
