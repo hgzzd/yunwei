@@ -1,12 +1,14 @@
 mod behavior;
+mod environment;
 mod model;
 mod platform;
 mod settings;
 
-use behavior::BehaviorEngine;
+use behavior::{BehaviorPlanner, Lcg, PlannerConfig};
+use environment::{DisplayMode, EnvironmentPolicy, EnvironmentPort, RecoveryPosition, VisibilityReason};
 use model::{
-    BubblePayload, Facing, PetScale, PetSettings, PetState, SettingsPatch, StatePayload,
-    VisibilityPayload,
+    AnimationObservation, BubblePayload, Footing, FootingSource, PetScale, PetSettings,
+    InputObservation, M1_PROTOCOL_VERSION, RuntimeSnapshot, SettingsPatch, VisibilityPayload, WorldPoint,
 };
 use settings::SettingsStore;
 use std::{
@@ -35,11 +37,11 @@ struct CoreState {
 
 struct RuntimeData {
     settings: PetSettings,
-    behavior: BehaviorEngine,
     manually_hidden: bool,
-    fullscreen_hidden: bool,
+    visibility_reason: Option<VisibilityReason>,
+    environment_policy: EnvironmentPolicy,
     drag: Option<DragState>,
-    last_state: Option<StatePayload>,
+    planner: BehaviorPlanner<Lcg>,
 }
 
 #[derive(Clone, Copy)]
@@ -85,14 +87,14 @@ fn lock_runtime(state: &CoreState) -> std::sync::MutexGuard<'_, RuntimeData> {
 }
 
 fn effective_visible(data: &RuntimeData) -> bool {
-    !data.manually_hidden && !data.fullscreen_hidden
+    !data.manually_hidden && data.visibility_reason.is_none()
 }
 
 fn visibility_payload(data: &RuntimeData) -> VisibilityPayload {
     VisibilityPayload {
         visible: effective_visible(data),
         manually_hidden: data.manually_hidden,
-        fullscreen_hidden: data.fullscreen_hidden,
+        fullscreen_hidden: data.visibility_reason == Some(VisibilityReason::Fullscreen),
     }
 }
 
@@ -129,6 +131,20 @@ fn save_settings(state: &CoreState, settings: &PetSettings) -> Result<(), String
 
 fn emit_settings<R: Runtime>(app: &AppHandle<R>, settings: &PetSettings) {
     let _ = app.emit("pet://settings", settings.clone());
+}
+
+fn emit_m1_snapshot<R: Runtime>(app: &AppHandle<R>, data: &mut RuntimeData, now_ms: u64) {
+    let mut snapshot = data.planner.runtime_snapshot(now_ms);
+    snapshot.display_mode = data.environment_policy.display_mode;
+    snapshot.manually_hidden = data.manually_hidden;
+    snapshot.visibility_reason = data.visibility_reason;
+    debug_assert!(snapshot.validate().is_ok());
+    let _ = app.emit("pet://runtime-snapshot", snapshot);
+}
+
+fn emit_m1_plan<R: Runtime>(app: &AppHandle<R>, data: &mut RuntimeData, now_ms: u64) {
+    let _ = app.emit("pet://motion-plan", data.planner.active_plan().clone());
+    emit_m1_snapshot(app, data, now_ms);
 }
 
 fn monitor_areas<R: Runtime>(window: &WebviewWindow<R>) -> Result<Vec<MonitorArea>, String> {
@@ -205,6 +221,27 @@ fn normalized_from_x(area: &MonitorArea, pet_width: u32, x: i32) -> f64 {
     }
 }
 
+fn m1_footing(area: &MonitorArea, pet_size: u32) -> Footing {
+    let scale = area.scale_factor.max(1.0);
+    Footing {
+        id: format!("{}:desktop-work-area", area.id),
+        monitor_id: area.id.clone(),
+        top_y_logical: (f64::from(area.height.saturating_sub(pet_size))) / scale,
+        min_x_logical: 0.0,
+        max_x_logical: f64::from(area.width.saturating_sub(pet_size)) / scale,
+        source: FootingSource::DesktopWorkArea,
+    }
+}
+
+fn m1_world_point(area: &MonitorArea, pet_size: u32, x: i32, y: i32) -> WorldPoint {
+    let scale = area.scale_factor.max(1.0);
+    WorldPoint::new(
+        area.id.clone(),
+        f64::from(x - area.x) / scale,
+        (f64::from(y - area.y)).min(f64::from(area.height.saturating_sub(pet_size))) / scale,
+    )
+}
+
 fn place_bubble<R: Runtime>(app: &AppHandle<R>, pet_x: i32, pet_y: i32, area: &MonitorArea) {
     let Some(bubble) = app.get_webview_window(BUBBLE_WINDOW) else {
         return;
@@ -265,6 +302,16 @@ fn get_settings(state: State<'_, CoreState>) -> PetSettings {
 }
 
 #[tauri::command]
+fn get_runtime_snapshot(state: State<'_, CoreState>) -> RuntimeSnapshot {
+    let mut data = lock_runtime(&state);
+    let mut snapshot = data.planner.runtime_snapshot(current_ms());
+    snapshot.display_mode = data.environment_policy.display_mode;
+    snapshot.manually_hidden = data.manually_hidden;
+    snapshot.visibility_reason = data.visibility_reason;
+    snapshot
+}
+
+#[tauri::command]
 fn update_settings(
     app: AppHandle,
     state: State<'_, CoreState>,
@@ -293,8 +340,29 @@ fn set_pet_visible(
     let mut data = lock_runtime(&state);
     data.manually_hidden = !visible;
     apply_window_visibility(&app, &data);
+    emit_m1_snapshot(&app, &mut data, current_ms());
     sync_menu(&app, &data);
     Ok(visibility_payload(&data))
+}
+
+/// M2 developer control only: intentionally in-memory, with no M4 settings UI
+/// or persistence surface.
+#[tauri::command]
+fn set_m2_environment_policy(
+    app: AppHandle,
+    state: State<'_, CoreState>,
+    display_mode: DisplayMode,
+    hide_rules: Vec<environment::HideRule>,
+) -> Result<(), String> {
+    if hide_rules.iter().any(|rule| rule.app_id.trim().is_empty()) {
+        return Err("隐藏规则的应用标识不能为空".into());
+    }
+    {
+        let mut data = lock_runtime(&state);
+        data.environment_policy = EnvironmentPolicy::new(display_mode, hide_rules);
+    }
+    update_windows_environment(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -380,7 +448,7 @@ fn begin_drag(
     state: State<'_, CoreState>,
     pointer_x: f64,
     pointer_y: f64,
-) -> Result<StatePayload, String> {
+) -> Result<(), String> {
     let pet = app
         .get_webview_window(PET_WINDOW)
         .ok_or_else(|| "pet 窗口不存在".to_string())?;
@@ -393,10 +461,10 @@ fn begin_drag(
         offset_x: cursor.x - f64::from(position.x),
         offset_y: cursor.y - f64::from(position.y),
     });
-    data.behavior.begin_drag();
-    let payload = data.behavior.payload();
-    let _ = app.emit("pet://state", payload.clone());
-    Ok(payload)
+    let now_ms = current_ms();
+    data.planner.begin_drag(now_ms);
+    emit_m1_plan(&app, &mut data, now_ms);
+    Ok(())
 }
 
 #[tauri::command]
@@ -406,9 +474,10 @@ fn drag_pet(
     pointer_x: f64,
     pointer_y: f64,
 ) -> Result<(), String> {
-    let drag = lock_runtime(&state)
-        .drag
-        .ok_or_else(|| "尚未开始拖动".to_string())?;
+    let (drag, footing) = {
+        let data = lock_runtime(&state);
+        (data.drag.ok_or_else(|| "尚未开始拖动".to_string())?, data.planner.footing().clone())
+    };
     let pet = app
         .get_webview_window(PET_WINDOW)
         .ok_or_else(|| "pet 窗口不存在".to_string())?;
@@ -417,81 +486,84 @@ fn drag_pet(
         .unwrap_or_else(|_| PhysicalPosition::new(pointer_x, pointer_y));
     let x = (cursor.x - drag.offset_x).round() as i32;
     let y = (cursor.y - drag.offset_y).round() as i32;
-    pet.set_position(PhysicalPosition::new(x, y))
-        .map_err(|error| error.to_string())?;
-    if let (Ok(size), Ok(areas)) = (pet.outer_size(), monitor_areas(&pet)) {
-        let center_x = f64::from(x) + f64::from(size.width) / 2.0;
-        let center_y = f64::from(y) + f64::from(size.height) / 2.0;
-        if let Some(area) = areas.iter().find(|area| area.contains(center_x, center_y)) {
-            place_bubble(&app, x, y, area);
-        }
-    }
+    let size = pet.outer_size().map_err(|error| error.to_string())?;
+    let areas = monitor_areas(&pet)?;
+    let area = areas
+        .iter()
+        .find(|area| area.id == footing.monitor_id)
+        .ok_or_else(|| "权威落脚显示器不可用".to_string())?;
+    let point = m1_world_point(area, size.width, x, y);
+    let now_ms = current_ms();
+    let mut data = lock_runtime(&state);
+    data.planner.drag_to(now_ms, point.clone());
+    apply_m1_position(&app, &point);
+    emit_m1_plan(&app, &mut data, now_ms);
     Ok(())
 }
 
 #[tauri::command]
-fn end_drag(app: AppHandle, state: State<'_, CoreState>) -> Result<PetSettings, String> {
-    let pet = app
-        .get_webview_window(PET_WINDOW)
-        .ok_or_else(|| "pet 窗口不存在".to_string())?;
-    let drag = lock_runtime(&state).drag;
-    let position = if let (Some(drag), Ok(cursor)) = (drag, pet.cursor_position()) {
-        let position = PhysicalPosition::new(
-            (cursor.x - drag.offset_x).round() as i32,
-            (cursor.y - drag.offset_y).round() as i32,
-        );
-        let _ = pet.set_position(position);
-        position
-    } else {
-        pet.outer_position().map_err(|error| error.to_string())?
-    };
-    let size = pet.outer_size().map_err(|error| error.to_string())?;
-    let center_x = f64::from(position.x) + f64::from(size.width) / 2.0;
-    let center_y = f64::from(position.y) + f64::from(size.height) / 2.0;
-    let areas = monitor_areas(&pet)?;
-    let area = areas
-        .iter()
-        .find(|area| area.contains(center_x, center_y))
-        .cloned()
-        .or_else(|| {
-            areas.iter().cloned().min_by_key(|area| {
-                let dx = center_x - (f64::from(area.x) + f64::from(area.width) / 2.0);
-                let dy = center_y - (f64::from(area.y) + f64::from(area.height) / 2.0);
-                (dx * dx + dy * dy) as u64
-            })
-        })
-        .ok_or_else(|| "没有检测到可用显示器".to_string())?;
-
+fn end_drag(
+    app: AppHandle,
+    state: State<'_, CoreState>,
+    pointer_x: f64,
+    pointer_y: f64,
+) -> Result<PetSettings, String> {
+    drag_pet(app.clone(), state.clone(), pointer_x, pointer_y)?;
     let mut data = lock_runtime(&state);
-    let pet_size = physical_pet_size(data.settings.scale, &area);
-    let clamped_x = position
-        .x
-        .clamp(area.x, area.x + area.width.saturating_sub(pet_size) as i32);
-    let y = area.y + area.height as i32 - pet_size as i32;
-    pet.set_size(PhysicalSize::new(pet_size, pet_size))
-        .map_err(|error| error.to_string())?;
-    pet.set_position(PhysicalPosition::new(clamped_x, y))
-        .map_err(|error| error.to_string())?;
-    place_bubble(&app, clamped_x, y, &area);
-    data.settings.normalized_x = normalized_from_x(&area, pet_size, clamped_x);
-    data.settings.monitor_id = Some(area.id);
     data.drag = None;
-    data.behavior.end_drag();
+    let now_ms = current_ms();
+    let plan = data.planner.land_after_drag(now_ms);
+    let footing = data.planner.footing().clone();
+    data.settings.normalized_x = if footing.max_x_logical > footing.min_x_logical {
+        ((plan.to.x_logical - footing.min_x_logical) / (footing.max_x_logical - footing.min_x_logical)).clamp(0.0, 1.0)
+    } else { 0.0 };
+    data.settings.monitor_id = Some(footing.monitor_id);
+    emit_m1_plan(&app, &mut data, now_ms);
     save_settings(&state, &data.settings)?;
     emit_settings(&app, &data.settings);
     Ok(data.settings.clone())
 }
 
 #[tauri::command]
-fn pet_clicked(app: AppHandle, state: State<'_, CoreState>) -> Result<StatePayload, String> {
-    let mut data = lock_runtime(&state);
-    let bubble = data.behavior.clicked();
+fn input_observed(
+    app: AppHandle,
+    state: State<'_, CoreState>,
+    protocol_version: u8,
+    observation: InputObservation,
+) -> Result<(), String> {
+    if protocol_version != M1_PROTOCOL_VERSION {
+        eprintln!("[m1 protocol] ignored unsupported input version {protocol_version}");
+        return Ok(());
+    }
+    match observation {
+        InputObservation::DragStarted { pointer_x_physical, pointer_y_physical } => begin_drag(app, state, pointer_x_physical, pointer_y_physical),
+        InputObservation::DragMoved { pointer_x_physical, pointer_y_physical } => {
+            drag_pet(app, state, pointer_x_physical, pointer_y_physical)
+        }
+        InputObservation::DragEnded { pointer_x_physical, pointer_y_physical } => end_drag(app, state, pointer_x_physical, pointer_y_physical).map(|_| ()),
+    }
+}
+
+#[tauri::command]
+fn animation_observed(state: State<'_, CoreState>, observation: AnimationObservation) {
+    if observation.protocol_version != M1_PROTOCOL_VERSION {
+        eprintln!("[m1 protocol] ignored unsupported animation version");
+        return;
+    }
+    let data = lock_runtime(&state);
+    if data.planner.active_plan().id != observation.plan_id {
+        eprintln!("[m1 protocol] ignored stale animation for plan {}", observation.plan_id);
+    }
+}
+
+#[tauri::command]
+fn pet_clicked(app: AppHandle, state: State<'_, CoreState>) -> Result<(), String> {
+    let data = lock_runtime(&state);
+    let bubble = BubblePayload { visible: true, text: Some("抓到你啦".into()), duration_ms: 4_000 };
     if data.settings.tutorial_step >= 3 {
         show_bubble(&app, &bubble);
     }
-    let payload = data.behavior.payload();
-    let _ = app.emit("pet://state", payload.clone());
-    Ok(payload)
+    Ok(())
 }
 
 #[tauri::command]
@@ -671,7 +743,7 @@ fn configure_windows(app: &tauri::App) -> tauri::Result<()> {
 
 fn start_runtime(app: AppHandle) {
     thread::spawn(move || {
-        let mut fullscreen_check_due = 0_u8;
+        let mut environment_check_due = 0_u8;
         loop {
             let state = app.state::<CoreState>();
             let visible = {
@@ -682,135 +754,39 @@ fn start_runtime(app: AppHandle) {
             let sleep_ms = if visible { 33 } else { 250 };
             thread::sleep(Duration::from_millis(sleep_ms));
 
-            fullscreen_check_due = fullscreen_check_due.saturating_add(1);
+            environment_check_due = environment_check_due.saturating_add(1);
             let check_every = if visible { 30 } else { 4 };
-            if fullscreen_check_due >= check_every {
-                fullscreen_check_due = 0;
-                update_fullscreen_visibility(&app);
-                ensure_pet_geometry(&app);
+            if environment_check_due >= check_every {
+                environment_check_due = 0;
+                update_windows_environment(&app);
             }
 
             let mut data = lock_runtime(&state);
             if !effective_visible(&data) {
                 continue;
             }
-            let result = data.behavior.tick(sleep_ms);
-            if data.last_state.as_ref() != Some(&result.state) {
-                data.last_state = Some(result.state.clone());
-                let _ = app.emit("pet://state", result.state.clone());
+            let now_ms = current_ms();
+            if data.planner.tick(now_ms).is_some() {
+                emit_m1_plan(&app, &mut data, now_ms);
             }
-            if data.drag.is_none() && data.behavior.state().moves() {
-                move_pet(&app, &mut data, sleep_ms);
-            }
-            if let Some(bubble) = result.bubble {
-                if data.settings.tutorial_step >= 3 {
-                    show_bubble(&app, &bubble);
-                }
+            if data.planner.behavior() != model::BehaviorState::Dragged {
+                apply_m1_position(&app, &data.planner.position_at(now_ms));
             }
         }
     });
 }
 
-fn ensure_pet_geometry(app: &AppHandle) {
-    let Some(pet) = app.get_webview_window(PET_WINDOW) else {
-        return;
-    };
-    let state = app.state::<CoreState>();
-    let mut data = lock_runtime(&state);
-    if data.drag.is_some() {
-        return;
-    }
-    let Ok(areas) = monitor_areas(&pet) else {
-        return;
-    };
-    if areas.is_empty() {
-        return;
-    }
-
-    let requested_monitor_exists = data
-        .settings
-        .monitor_id
-        .as_ref()
-        .is_some_and(|id| areas.iter().any(|area| &area.id == id));
-    if !requested_monitor_exists {
-        data.settings.monitor_id = None;
-        data.settings.normalized_x = PetSettings::default().normalized_x;
-        if position_from_settings(app, &mut data.settings).is_ok() {
-            let _ = save_settings(&state, &data.settings);
-            emit_settings(app, &data.settings);
-        }
-        return;
-    }
-
-    let (Ok(position), Ok(size)) = (pet.outer_position(), pet.outer_size()) else {
-        return;
-    };
-    let Some(area) = areas.iter().find(|area| {
-        data.settings
-            .monitor_id
-            .as_ref()
-            .is_some_and(|id| &area.id == id)
-    }) else {
-        return;
-    };
-    let expected_size = physical_pet_size(data.settings.scale, area);
-    let expected_y = area.y + area.height as i32 - expected_size as i32;
-    if size.width != expected_size || size.height != expected_size {
-        data.settings.normalized_x = normalized_from_x(area, size.width, position.x);
-        let x = x_from_normalized(area, expected_size, data.settings.normalized_x);
-        let _ = pet.set_size(PhysicalSize::new(expected_size, expected_size));
-        let _ = pet.set_position(PhysicalPosition::new(x, expected_y));
-        place_bubble(app, x, expected_y, area);
-        let _ = save_settings(&state, &data.settings);
-        emit_settings(app, &data.settings);
-    } else if position.y != expected_y {
-        let x = position.x.clamp(
-            area.x,
-            area.x + area.width.saturating_sub(expected_size) as i32,
-        );
-        let _ = pet.set_position(PhysicalPosition::new(x, expected_y));
-        place_bubble(app, x, expected_y, area);
-    }
-}
-
-fn move_pet(app: &AppHandle, data: &mut RuntimeData, elapsed_ms: u64) {
-    let Some(pet) = app.get_webview_window(PET_WINDOW) else {
-        return;
-    };
-    let (Ok(position), Ok(size), Ok(areas)) =
-        (pet.outer_position(), pet.outer_size(), monitor_areas(&pet))
-    else {
-        return;
-    };
-    let center_x = f64::from(position.x) + f64::from(size.width) / 2.0;
-    let center_y = f64::from(position.y) + f64::from(size.height) / 2.0;
-    let Some(area) = areas.iter().find(|area| area.contains(center_x, center_y)) else {
-        return;
-    };
-    let logical_speed = if data.behavior.state() == PetState::Running {
-        150.0
-    } else {
-        65.0
-    };
-    let delta = (logical_speed * area.scale_factor * elapsed_ms as f64 / 1_000.0).max(1.0);
-    let direction = if data.behavior.facing() == Facing::Right {
-        1.0
-    } else {
-        -1.0
-    };
-    let min_x = area.x;
-    let max_x = area.x + area.width.saturating_sub(size.width) as i32;
-    let proposed = (f64::from(position.x) + direction * delta).round() as i32;
-    let x = proposed.clamp(min_x, max_x.max(min_x));
-    if proposed != x {
-        data.behavior.reverse();
-    }
-    let y = area.y + area.height as i32 - size.height as i32;
+fn apply_m1_position(app: &AppHandle, point: &WorldPoint) {
+    let Some(pet) = app.get_webview_window(PET_WINDOW) else { return; };
+    let Ok(areas) = monitor_areas(&pet) else { return; };
+    let Some(area) = areas.iter().find(|area| area.id == point.monitor_id) else { return; };
+    let x = area.x + (point.x_logical * area.scale_factor).round() as i32;
+    let y = area.y + (point.y_logical * area.scale_factor).round() as i32;
     let _ = pet.set_position(PhysicalPosition::new(x, y));
     place_bubble(app, x, y, area);
 }
 
-fn update_fullscreen_visibility(app: &AppHandle) {
+fn update_windows_environment(app: &AppHandle) {
     #[cfg(target_os = "windows")]
     let ignored = [PET_WINDOW, BUBBLE_WINDOW]
         .iter()
@@ -821,11 +797,39 @@ fn update_fullscreen_visibility(app: &AppHandle) {
     #[cfg(not(target_os = "windows"))]
     let ignored = Vec::new();
 
-    let fullscreen = platform::foreground_is_fullscreen(&ignored);
     let state = app.state::<CoreState>();
     let mut data = lock_runtime(&state);
-    if data.fullscreen_hidden != fullscreen {
-        data.fullscreen_hidden = fullscreen;
+    let snapshot = platform::WindowsEnvironmentPort::new(ignored).snapshot(current_ms());
+    let recovery = RecoveryPosition {
+        monitor_id: data.settings.monitor_id.clone(),
+        normalized_x: data.settings.normalized_x,
+    };
+    let decision = data.environment_policy.resolve(
+        &snapshot,
+        f64::from(data.settings.scale.logical_pixels()),
+        Some(&recovery),
+        data.manually_hidden,
+    );
+    let changed_visibility = data.visibility_reason != decision.visibility_reason;
+    data.visibility_reason = decision.visibility_reason;
+    if let Some(footing) = decision.footing {
+        if *data.planner.footing() != footing && data.planner.behavior() != model::BehaviorState::Dragged {
+            let x = if data.planner.position().monitor_id == footing.monitor_id {
+                data.planner.position_at(current_ms()).x_logical
+            } else {
+                footing.min_x_logical
+                    + (footing.max_x_logical - footing.min_x_logical) * recovery.normalized_x.clamp(0.0, 1.0)
+            };
+            let point = WorldPoint::new(footing.monitor_id.clone(), x, footing.top_y_logical);
+            data.planner.reanchor(current_ms(), footing, point);
+            emit_m1_plan(app, &mut data, current_ms());
+        } else if changed_visibility {
+            emit_m1_snapshot(app, &mut data, current_ms());
+        }
+    } else if changed_visibility {
+        emit_m1_snapshot(app, &mut data, current_ms());
+    }
+    if changed_visibility {
         apply_window_visibility(app, &data);
     }
 }
@@ -835,6 +839,13 @@ fn current_seed() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(1)
+}
+
+fn current_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -856,26 +867,38 @@ pub fn run() {
             {
                 settings.autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
             }
+            configure_windows(app)?;
+            position_from_settings(app.handle(), &mut settings)?;
+            let pet = app
+                .get_webview_window(PET_WINDOW)
+                .ok_or_else(|| tauri::Error::AssetNotFound(PET_WINDOW.into()))?;
+            let area = selected_monitor(&pet, settings.monitor_id.as_deref())?;
+            let position = pet.outer_position()?;
+            let size = physical_pet_size(settings.scale, &area);
+            let planner = BehaviorPlanner::new(
+                PlannerConfig::default(),
+                Lcg::new(current_seed()),
+                m1_world_point(&area, size, position.x, position.y),
+                m1_footing(&area, size),
+                current_ms(),
+            );
             store.save(&settings)?;
             app.manage(CoreState {
                 store,
                 runtime: Mutex::new(RuntimeData {
                     settings,
-                    behavior: BehaviorEngine::new(current_seed()),
                     manually_hidden: false,
-                    fullscreen_hidden: false,
+                    visibility_reason: None,
+                    environment_policy: EnvironmentPolicy::default(),
                     drag: None,
-                    last_state: None,
+                    planner,
                 }),
             });
-
-            configure_windows(app)?;
             {
                 let state = app.state::<CoreState>();
                 let mut data = lock_runtime(&state);
-                position_from_settings(app.handle(), &mut data.settings)?;
-                state.store.save(&data.settings)?;
                 apply_window_visibility(app.handle(), &data);
+                emit_m1_snapshot(app.handle(), &mut data, current_ms());
             }
 
             let handles = create_menu(app)?;
@@ -895,15 +918,16 @@ pub fn run() {
         .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_runtime_snapshot,
             update_settings,
             set_pet_visible,
+            set_m2_environment_policy,
             set_pet_scale,
             set_sound_enabled,
             set_autostart_enabled,
             reset_pet_position,
-            begin_drag,
-            drag_pet,
-            end_drag,
+            input_observed,
+            animation_observed,
             pet_clicked,
             tutorial_advanced,
             show_context_menu,
@@ -950,13 +974,27 @@ mod tests {
 
     #[test]
     fn manual_hide_has_priority_over_fullscreen_restore() {
+        let footing = Footing {
+            id: "desktop".into(),
+            monitor_id: "primary".into(),
+            top_y_logical: 420.0,
+            min_x_logical: 0.0,
+            max_x_logical: 500.0,
+            source: FootingSource::DesktopWorkArea,
+        };
         let data = RuntimeData {
             settings: PetSettings::default(),
-            behavior: BehaviorEngine::new(1),
             manually_hidden: true,
-            fullscreen_hidden: false,
+            visibility_reason: None,
+            environment_policy: EnvironmentPolicy::default(),
             drag: None,
-            last_state: None,
+            planner: BehaviorPlanner::new(
+                PlannerConfig::default(),
+                Lcg::new(1),
+                WorldPoint::new("primary", 100.0, 420.0),
+                footing,
+                0,
+            ),
         };
         assert!(!effective_visible(&data));
     }

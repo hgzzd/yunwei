@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { WindowKind } from "./pet-model";
+import type { AnimationObservation, InputObservation, RuntimeSnapshot, WindowKind } from "./pet-model";
 
 export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -44,6 +44,18 @@ export async function safeListen<T>(
     reportBridgeError(`event:${event}`, error);
     return () => undefined;
   }
+}
+
+export function observeInput(observation: InputObservation): Promise<void | undefined> {
+  return safeInvoke<void>("input_observed", { protocolVersion: 1, observation });
+}
+
+export function observeAnimation(observation: AnimationObservation): Promise<void | undefined> {
+  return safeInvoke<void>("animation_observed", { observation });
+}
+
+export function getAuthoritativeRuntimeSnapshot(): Promise<RuntimeSnapshot | undefined> {
+  return safeInvoke<RuntimeSnapshot>("get_runtime_snapshot");
 }
 
 function reportBridgeError(source: string, error: unknown): void {

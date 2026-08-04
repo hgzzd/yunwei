@@ -77,6 +77,19 @@ if (manifest) {
   }
 
   const animations = manifest.animations;
+  const presentationPhases = ["idleLoop", "walkCycle", "jumpPrepare", "jumpAscend", "jumpApex", "jumpDescend", "landCompress", "landRecover", "dragVisual"];
+  for (const phase of presentationPhases) {
+    const spec = manifest.presentation?.[phase];
+    if (!spec || typeof spec.animation !== "string" || spec.anchor !== "bottomCenter" || typeof spec.loop !== "boolean") {
+      fail(`M1 表现阶段 ${phase} 必须声明 animation、bottomCenter 锚点和 loop`);
+      continue;
+    }
+    const source = animations?.[spec.animation];
+    if (!source || !Array.isArray(spec.frames) || spec.frames.length === 0
+      || !spec.frames.every((frame) => Number.isInteger(frame) && source.frames.includes(frame))) {
+      fail(`M1 表现阶段 ${phase} 必须引用已有图集中的有效帧`);
+    }
+  }
   for (const [state, expectedCount] of Object.entries(expectedFrameCounts)) {
     if (!animations || !(state in animations)) {
       fail(`图集清单缺少动作: ${state}`);

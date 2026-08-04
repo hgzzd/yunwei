@@ -2,17 +2,20 @@ import placeholderUrl from "./assets/yunwei-placeholder.svg";
 import { GestureTracker, type GestureAction, type PointerPoint } from "./gesture";
 import {
   normalizeBubbleMessage,
-  normalizeRenderState,
+  isRuntimeVisible,
+  parseRuntimeSnapshot,
   normalizeTutorialStep,
   tutorialText,
   type BubbleMessage,
   type PetSettings,
+  type PresentationPhase,
   type RenderState,
   type SpriteManifest,
 } from "./pet-model";
 import { SpriteRenderer } from "./sprite-renderer";
+import { PlanPlayer } from "./plan-player";
 import { fetchSpriteManifest } from "./sprite-manifest";
-import { currentWindowKind, safeInvoke, safeListen } from "./tauri-bridge";
+import { currentWindowKind, getAuthoritativeRuntimeSnapshot, observeAnimation, observeInput, safeInvoke, safeListen } from "./tauri-bridge";
 import { PetAudioPlayer, SoundGate } from "./pet-audio";
 
 const DEFAULT_MANIFEST: SpriteManifest = {
@@ -72,6 +75,9 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
   const manifest = await fetchSpriteManifest("/assets/sprites/manifest.json")
     ?? DEFAULT_MANIFEST;
   const renderer = new SpriteRenderer(canvas, manifest);
+  const planPlayer = new PlanPlayer();
+  let renderedPlanPhase = "";
+  let observedPlan: { id: number; phase: PresentationPhase } | null = null;
   const assetLoaded = await renderer.load();
   if (!assetLoaded) announce("角色资源加载失败，已启用简化外观。");
 
@@ -86,6 +92,18 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
   resizeObserver.observe(stage);
 
   const animate = (now: number): void => {
+    const sample = planPlayer.sample(Date.now());
+    if (sample && sample.phase !== renderedPlanPhase) {
+      if (observedPlan && (observedPlan.id !== sample.planId || observedPlan.phase !== sample.phase)) {
+        void observeAnimation({
+          protocolVersion: 1, planId: observedPlan.id, phase: observedPlan.phase,
+        });
+      }
+      observedPlan = { id: sample.planId, phase: sample.phase };
+      renderedPlanPhase = sample.phase;
+      renderer.setState({ state: spriteStateForPhase(sample.phase), facing: sample.facing });
+      stage.setAttribute("aria-label", `云尾兽，正在${sample.phase}`);
+    }
     if (visible) renderer.draw(now);
     animationHandle = window.requestAnimationFrame(animate);
   };
@@ -108,7 +126,9 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
     if (!pendingDragMove) return;
     const point = pendingDragMove;
     pendingDragMove = null;
-    void safeInvoke("drag_pet", { pointerX: point.screenX, pointerY: point.screenY });
+    void observeInput({
+      kind: "dragMoved", pointerXPhysical: point.screenX, pointerYPhysical: point.screenY,
+    });
   };
 
   const dispatch = (actions: readonly GestureAction[]): void => {
@@ -120,8 +140,9 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
         if (tutorialStep === 0) advanceTutorial(1);
       } else if (action.kind === "dragStart") {
         document.body.classList.add("is-dragging");
-        renderer.setState({ state: "dragged", facing: "right" });
-        void safeInvoke("begin_drag", { pointerX: point.screenX, pointerY: point.screenY });
+        void observeInput({
+          kind: "dragStarted", pointerXPhysical: point.screenX, pointerYPhysical: point.screenY,
+        });
       } else if (action.kind === "dragMove") {
         pendingDragMove = point;
         if (!dragFrame) dragFrame = window.requestAnimationFrame(flushDragMove);
@@ -130,7 +151,9 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
         pendingDragMove = null;
         if (dragFrame) window.cancelAnimationFrame(dragFrame);
         dragFrame = 0;
-        void safeInvoke("end_drag");
+        void observeInput({
+          kind: "dragEnded", pointerXPhysical: point.screenX, pointerYPhysical: point.screenY,
+        });
         if (tutorialStep === 1) advanceTutorial(2);
       }
     }
@@ -171,23 +194,30 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
   });
 
   const unlisteners = await Promise.all([
-    safeListen<unknown>("pet://state", (payload) => {
-      const state = normalizeRenderState(payload);
-      audio.play(soundGate.stateChanged(state.state, performance.now()));
-      renderer.setState(state);
-      stage.setAttribute("aria-label", ariaLabelForState(state));
+    safeListen<unknown>("pet://motion-plan", (payload) => {
+      if (!planPlayer.acceptMotionPlan(payload)) console.warn("[yunwei] 忽略非法或过期的运动计划。");
+    }),
+    safeListen<unknown>("pet://runtime-snapshot", (payload) => {
+      if (!planPlayer.acceptRuntimeSnapshot(payload)) {
+        console.warn("[yunwei] 忽略非法或过期的运行时快照。");
+        return;
+      }
+      visible = planPlayer.isVisible();
+      stage.hidden = !visible;
     }),
     safeListen<PetSettings>("pet://settings", (settings) => {
       tutorialStep = normalizeTutorialStep(settings?.tutorialStep);
       applySoundSetting(settings?.soundEnabled === true);
     }),
-    safeListen<unknown>("pet://visibility", (payload) => {
-      visible = visibilityFrom(payload);
-      stage.hidden = !visible;
-    }),
   ]);
 
   const settings = await safeInvoke<PetSettings>("get_settings");
+  const snapshot = await getAuthoritativeRuntimeSnapshot();
+  if (snapshot && !planPlayer.acceptRuntimeSnapshot(snapshot)) {
+    console.warn("[yunwei] 忽略非法的启动运动快照。");
+  }
+  visible = planPlayer.isVisible();
+  stage.hidden = !visible;
   tutorialStep = normalizeTutorialStep(settings?.tutorialStep);
   applySoundSetting(settings?.soundEnabled === true);
 
@@ -197,6 +227,14 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
     resizeObserver.disconnect();
     for (const unlisten of unlisteners) unlisten();
   }, { once: true });
+}
+
+function spriteStateForPhase(phase: import("./pet-model").PresentationPhase): RenderState["state"] {
+  const mapping: Record<import("./pet-model").PresentationPhase, RenderState["state"]> = {
+    idleLoop: "idle", walkCycle: "walking", jumpPrepare: "stretching", jumpAscend: "tumbling",
+    jumpApex: "tumbling", jumpDescend: "tumbling", landCompress: "sitting", landRecover: "idle", dragVisual: "dragged",
+  };
+  return mapping[phase];
 }
 
 async function startBubbleWindow(app: HTMLElement): Promise<void> {
@@ -243,8 +281,9 @@ async function startBubbleWindow(app: HTMLElement): Promise<void> {
     safeListen<PetSettings>("pet://settings", (settings) => {
       showTutorial(settings?.tutorialStep);
     }),
-    safeListen<unknown>("pet://visibility", (payload) => {
-      if (!visibilityFrom(payload)) show({ text: "", visible: false, kind: "speech", durationMs: 0 });
+    safeListen<unknown>("pet://runtime-snapshot", (payload) => {
+      const snapshot = parseRuntimeSnapshot(payload);
+      if (!snapshot || !isRuntimeVisible(snapshot)) show({ text: "", visible: false, kind: "speech", durationMs: 0 });
       else if (tutorialStep < 3) showTutorial(tutorialStep);
     }),
   ]);
@@ -264,28 +303,6 @@ function pointerPoint(event: PointerEvent): PointerPoint {
     screenX: event.screenX,
     screenY: event.screenY,
   };
-}
-
-function visibilityFrom(payload: unknown): boolean {
-  if (typeof payload === "boolean") return payload;
-  if (payload && typeof payload === "object") {
-    return (payload as Record<string, unknown>).visible !== false;
-  }
-  return true;
-}
-
-function ariaLabelForState(state: RenderState): string {
-  const labels: Record<RenderState["state"], string> = {
-    idle: "发呆",
-    walking: "散步",
-    running: "奔跑",
-    sitting: "坐下",
-    sleeping: "睡觉",
-    stretching: "伸懒腰",
-    tumbling: "摔跟头",
-    dragged: "被拖动",
-  };
-  return `云尾兽，正在${labels[state.state]}`;
 }
 
 function announce(message: string): void {

@@ -2,6 +2,17 @@
   "imageUrl": "/assets/sprites/idle.png",
   "frameWidth": 256,
   "frameHeight": 256,
+  "presentation": {
+    "idleLoop": { "animation": "idle", "frames": [0, 1, 2, 3], "anchor": "bottomCenter", "loop": true },
+    "walkCycle": { "animation": "walking", "frames": [0, 1, 2, 3, 0, 1, 2, 3], "anchor": "bottomCenter", "loop": true },
+    "jumpPrepare": { "animation": "stretching", "frames": [0, 1, 2, 3, 2, 1], "anchor": "bottomCenter", "loop": false },
+    "jumpAscend": { "animation": "tumbling", "frames": [0, 1], "anchor": "bottomCenter", "loop": false },
+    "jumpApex": { "animation": "tumbling", "frames": [2, 3], "anchor": "bottomCenter", "loop": false },
+    "jumpDescend": { "animation": "tumbling", "frames": [2, 1, 0, 3], "anchor": "bottomCenter", "loop": false },
+    "landCompress": { "animation": "sitting", "frames": [0, 1], "anchor": "bottomCenter", "loop": false },
+    "landRecover": { "animation": "idle", "frames": [0, 1, 2, 3], "anchor": "bottomCenter", "loop": false },
+    "dragVisual": { "animation": "dragged", "frames": [0, 2], "anchor": "bottomCenter", "loop": true }
+  },
   "animations": {
     "idle": {
       "imageUrl": "/assets/sprites/idle.png",
