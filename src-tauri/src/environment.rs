@@ -106,8 +106,6 @@ pub(crate) enum VisibilityReason {
     SpecifiedApp,
     DesktopOnlyForeground,
     MonitorUnavailable,
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

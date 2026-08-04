@@ -9,6 +9,8 @@ export const PET_STATES = [
   "dragged",
 ] as const;
 
+export const PROTOCOL_VERSION = 2 as const;
+
 export type PetState = (typeof PET_STATES)[number];
 export type Facing = "left" | "right";
 export type WindowKind = "pet" | "bubble";
@@ -19,27 +21,28 @@ export const BEHAVIOR_STATES = ["idle", "walking", "jumping", "landing", "dragge
 export type BehaviorState = (typeof BEHAVIOR_STATES)[number];
 export type FootingSource = "desktopWorkArea" | "foregroundWindowTop";
 export type DisplayMode = "aboveNormalWindows" | "desktopOnly";
-export type VisibilityReason = "fullscreen" | "specifiedApp" | "desktopOnlyForeground" | "monitorUnavailable" | "unknown";
+export type VisibilityReason = "fullscreen" | "specifiedApp" | "desktopOnlyForeground" | "monitorUnavailable";
 
 export interface WorldPoint { monitorId: string; xLogical: number; yLogical: number; }
 export interface MotionArc { apex: WorldPoint; startOffsetMs: number; endOffsetMs: number; }
 export interface PhaseSlice { phase: PresentationPhase; startOffsetMs: number; durationMs: number; }
 export interface MotionPlan {
-  protocolVersion: 1; sequence: number; id: number; kind: MotionKind; startedAtMs: number;
+  protocolVersion: 2; sequence: number; id: number; kind: MotionKind; startedAtMs: number;
   durationMs: number; from: WorldPoint; to: WorldPoint; arc?: MotionArc; facing: Facing; phaseSchedule: PhaseSlice[];
 }
 export interface Footing {
   id: string; monitorId: string; topYLogical: number; minXLogical: number; maxXLogical: number; source: FootingSource;
 }
 export interface RuntimeSnapshot {
-  protocolVersion: 1; sequence: number; behavior: BehaviorState; position: WorldPoint; footing: Footing; activePlan?: MotionPlan;
+  protocolVersion: 2; sequence: number; behavior: BehaviorState; position: WorldPoint; footing: Footing; activePlan?: MotionPlan;
   displayMode: DisplayMode; manuallyHidden: boolean; visibilityReason: VisibilityReason | null;
 }
 export type InputObservation =
+  | { kind: "singleClick" }
   | { kind: "dragStarted"; pointerXPhysical: number; pointerYPhysical: number }
   | { kind: "dragMoved"; pointerXPhysical: number; pointerYPhysical: number }
   | { kind: "dragEnded"; pointerXPhysical: number; pointerYPhysical: number };
-export interface AnimationObservation { protocolVersion: 1; planId: number; phase: PresentationPhase; }
+export interface AnimationObservation { protocolVersion: 2; planId: number; phase: PresentationPhase; }
 
 export interface AnimationSpec {
   frames: readonly number[];
@@ -74,11 +77,12 @@ export interface PetSettings {
   tutorialStep: number;
 }
 
-export interface BubbleMessage {
-  text: string;
+export interface TutorialBubbleDirective {
+  protocolVersion: 2;
+  sequence: number;
+  id: number;
   visible: boolean;
-  kind: "speech" | "tutorial";
-  durationMs: number;
+  text: string | null;
 }
 
 const STATE_ALIASES: Readonly<Record<string, PetState>> = {
@@ -122,52 +126,31 @@ export function normalizeRenderState(payload: unknown): RenderState {
   };
 }
 
-export function normalizeBubbleMessage(payload: unknown): BubbleMessage | null {
-  if (typeof payload === "string") {
-    return payload.trim()
-      ? { text: payload.trim(), visible: true, kind: "speech", durationMs: 4_000 }
-      : null;
-  }
-
-  if (!payload || typeof payload !== "object") return null;
-  const record = payload as Record<string, unknown>;
-  const text = typeof record.text === "string" ? record.text.trim() : "";
-  const visible = record.visible !== false && text.length > 0;
-  const durationMs = typeof record.durationMs === "number"
-    ? Math.max(0, record.durationMs)
-    : 4_000;
-
-  return {
-    text,
-    visible,
-    kind: record.kind === "tutorial" ? "tutorial" : "speech",
-    durationMs,
-  };
-}
-
-export function tutorialText(step: number): string | null {
-  return ["点我一下？", "还能拖我走！", "右键能管住我。"][step] ?? null;
-}
-
-export function normalizeTutorialStep(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value)
-    ? Math.max(0, Math.min(3, Math.floor(value)))
-    : 0;
+export function parseTutorialBubbleDirective(value: unknown): TutorialBubbleDirective | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (v.protocolVersion !== PROTOCOL_VERSION || !positiveInteger(v.sequence) || !positiveInteger(v.id)
+    || typeof v.visible !== "boolean" || (v.text !== null && typeof v.text !== "string")) return null;
+  if (!hasOnlyKeys(v, ["protocolVersion", "sequence", "id", "visible", "text"])) return null;
+  const text = typeof v.text === "string" ? v.text.trim() : null;
+  if ((v.visible && !text) || (!v.visible && text !== null)) return null;
+  return { protocolVersion: PROTOCOL_VERSION, sequence: v.sequence, id: v.id, visible: v.visible, text };
 }
 
 export function parseMotionPlan(value: unknown): MotionPlan | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
-  if (v.protocolVersion !== 1 || !positiveInteger(v.sequence) || !positiveInteger(v.id)
+  if (v.protocolVersion !== PROTOCOL_VERSION || !positiveInteger(v.sequence) || !positiveInteger(v.id)
     || !["idle", "walk", "jump", "landing", "drag"].includes(String(v.kind))
     || !finiteNonNegative(v.startedAtMs) || !positiveInteger(v.durationMs) || !isPoint(v.from) || !isPoint(v.to)
     || (v.from as WorldPoint).monitorId !== (v.to as WorldPoint).monitorId || !Array.isArray(v.phaseSchedule)
     || (v.facing !== "left" && v.facing !== "right")) return null;
+  if (!hasOnlyKeys(v, ["protocolVersion", "sequence", "id", "kind", "startedAtMs", "durationMs", "from", "to", "arc", "facing", "phaseSchedule"])) return null;
   const phaseSchedule = v.phaseSchedule.map(parsePhase);
   if (phaseSchedule.some((phase) => !phase) || !contiguous(phaseSchedule as PhaseSlice[], v.durationMs as number)) return null;
   const arc = v.arc === undefined ? undefined : parseArc(v.arc, (v.from as WorldPoint).monitorId, v.durationMs as number);
   if (v.arc !== undefined && !arc) return null;
-  return { protocolVersion: 1, sequence: v.sequence as number, id: v.id as number, kind: v.kind as MotionKind,
+  return { protocolVersion: PROTOCOL_VERSION, sequence: v.sequence as number, id: v.id as number, kind: v.kind as MotionKind,
     startedAtMs: v.startedAtMs as number, durationMs: v.durationMs as number, from: v.from as WorldPoint,
     to: v.to as WorldPoint, ...(arc ? { arc } : {}), facing: v.facing, phaseSchedule: phaseSchedule as PhaseSlice[] };
 }
@@ -175,15 +158,16 @@ export function parseMotionPlan(value: unknown): MotionPlan | null {
 export function parseRuntimeSnapshot(value: unknown): RuntimeSnapshot | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
-  if (v.protocolVersion !== 1 || !positiveInteger(v.sequence) || !(BEHAVIOR_STATES as readonly string[]).includes(String(v.behavior))
-    || !isPoint(v.position) || !isFooting(v.footing) || v.position.monitorId !== v.footing.monitorId) return null;
+  if (v.protocolVersion !== PROTOCOL_VERSION || !positiveInteger(v.sequence) || !(BEHAVIOR_STATES as readonly string[]).includes(String(v.behavior))
+    || !isPoint(v.position) || !isFooting(v.footing) || v.position.monitorId !== v.footing.monitorId
+    || (v.displayMode !== "aboveNormalWindows" && v.displayMode !== "desktopOnly")
+    || typeof v.manuallyHidden !== "boolean" || !isVisibilityReason(v.visibilityReason)) return null;
+  if (!hasOnlyKeys(v, ["protocolVersion", "sequence", "behavior", "position", "footing", "activePlan", "displayMode", "manuallyHidden", "visibilityReason"])) return null;
   const plan = v.activePlan === undefined ? undefined : parseMotionPlan(v.activePlan);
   if (v.activePlan !== undefined && (!plan || plan.sequence >= v.sequence || plan.from.monitorId !== v.position.monitorId || plan.to.monitorId !== v.position.monitorId)) return null;
-  const displayMode: DisplayMode = v.displayMode === "desktopOnly" ? "desktopOnly" : "aboveNormalWindows";
-  const visibilityReason = parseVisibilityReason(v.visibilityReason);
-  return { protocolVersion: 1, sequence: v.sequence as number, behavior: v.behavior as BehaviorState,
-    position: v.position as WorldPoint, footing: v.footing as Footing, displayMode,
-    manuallyHidden: v.manuallyHidden === true, visibilityReason, ...(plan ? { activePlan: plan } : {}) };
+  return { protocolVersion: PROTOCOL_VERSION, sequence: v.sequence as number, behavior: v.behavior as BehaviorState,
+    position: v.position as WorldPoint, footing: v.footing as Footing, displayMode: v.displayMode,
+    manuallyHidden: v.manuallyHidden, visibilityReason: v.visibilityReason, ...(plan ? { activePlan: plan } : {}) };
 }
 
 export function isRuntimeVisible(snapshot: RuntimeSnapshot | null): boolean {
@@ -193,6 +177,7 @@ export function isRuntimeVisible(snapshot: RuntimeSnapshot | null): boolean {
 export function parseInputObservation(value: unknown): InputObservation | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
+  if (v.kind === "singleClick") return { kind: "singleClick" };
   return ["dragStarted", "dragMoved", "dragEnded"].includes(String(v.kind)) && Number.isFinite(v.pointerXPhysical) && Number.isFinite(v.pointerYPhysical)
     ? { kind: v.kind as InputObservation["kind"], pointerXPhysical: v.pointerXPhysical as number, pointerYPhysical: v.pointerYPhysical as number } : null;
 }
@@ -200,42 +185,47 @@ export function parseInputObservation(value: unknown): InputObservation | null {
 export function parseAnimationObservation(value: unknown): AnimationObservation | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
-  return v.protocolVersion === 1 && positiveInteger(v.planId) && (PRESENTATION_PHASES as readonly string[]).includes(String(v.phase))
-    ? { protocolVersion: 1, planId: v.planId as number, phase: v.phase as PresentationPhase } : null;
+  return v.protocolVersion === PROTOCOL_VERSION && positiveInteger(v.planId) && (PRESENTATION_PHASES as readonly string[]).includes(String(v.phase))
+    ? { protocolVersion: PROTOCOL_VERSION, planId: v.planId as number, phase: v.phase as PresentationPhase } : null;
 }
 
 function isPoint(value: unknown): value is WorldPoint {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  return typeof v.monitorId === "string" && v.monitorId.trim().length > 0 && Number.isFinite(v.xLogical) && Number.isFinite(v.yLogical);
+  return hasOnlyKeys(v, ["monitorId", "xLogical", "yLogical"])
+    && typeof v.monitorId === "string" && v.monitorId.trim().length > 0 && Number.isFinite(v.xLogical) && Number.isFinite(v.yLogical);
 }
 function isFooting(value: unknown): value is Footing {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  return typeof v.id === "string" && v.id.trim().length > 0 && typeof v.monitorId === "string" && v.monitorId.trim().length > 0
+  return hasOnlyKeys(v, ["id", "monitorId", "topYLogical", "minXLogical", "maxXLogical", "source"])
+    && typeof v.id === "string" && v.id.trim().length > 0 && typeof v.monitorId === "string" && v.monitorId.trim().length > 0
     && Number.isFinite(v.topYLogical) && Number.isFinite(v.minXLogical) && Number.isFinite(v.maxXLogical)
     && (v.minXLogical as number) <= (v.maxXLogical as number)
     && (v.source === "desktopWorkArea" || v.source === "foregroundWindowTop");
 }
-function parseVisibilityReason(value: unknown): VisibilityReason | null {
-  if (value === undefined || value === null) return null;
-  return ["fullscreen", "specifiedApp", "desktopOnlyForeground", "monitorUnavailable"].includes(String(value))
-    ? value as VisibilityReason : "unknown";
+function isVisibilityReason(value: unknown): value is VisibilityReason | null {
+  return value === null || ["fullscreen", "specifiedApp", "desktopOnlyForeground", "monitorUnavailable"].includes(String(value));
 }
 function parsePhase(value: unknown): PhaseSlice | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
-  return (PRESENTATION_PHASES as readonly string[]).includes(String(v.phase)) && finiteNonNegative(v.startOffsetMs) && positiveInteger(v.durationMs)
+  return hasOnlyKeys(v, ["phase", "startOffsetMs", "durationMs"])
+    && (PRESENTATION_PHASES as readonly string[]).includes(String(v.phase)) && finiteNonNegative(v.startOffsetMs) && positiveInteger(v.durationMs)
     ? { phase: v.phase as PresentationPhase, startOffsetMs: v.startOffsetMs as number, durationMs: v.durationMs as number } : null;
 }
 function parseArc(value: unknown, monitorId: string, durationMs: number): MotionArc | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
-  return isPoint(v.apex) && v.apex.monitorId === monitorId && finiteNonNegative(v.startOffsetMs) && finiteNonNegative(v.endOffsetMs)
+  return hasOnlyKeys(v, ["apex", "startOffsetMs", "endOffsetMs"])
+    && isPoint(v.apex) && v.apex.monitorId === monitorId && finiteNonNegative(v.startOffsetMs) && finiteNonNegative(v.endOffsetMs)
     && (v.startOffsetMs as number) < (v.endOffsetMs as number) && (v.endOffsetMs as number) <= durationMs
     ? { apex: v.apex, startOffsetMs: v.startOffsetMs as number, endOffsetMs: v.endOffsetMs as number } : null;
 }
 function positiveInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value > 0; }
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
 function finiteNonNegative(value: unknown): value is number { return typeof value === "number" && Number.isFinite(value) && value >= 0; }
 function contiguous(phases: PhaseSlice[], durationMs: number): boolean {
   let next = 0;

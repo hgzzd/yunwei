@@ -1,5 +1,28 @@
 # 云尾兽 MVP 实施清单
 
+## M1/M2 权威与协议前置修复（完成，2026-08-04）
+
+- [x] P6.1：以失败测试锁定设置、重置与启动只经 `BehaviorPlanner` 重锚并由 Rust 应用窗口位置。
+- [x] P6.2：以失败测试锁定 v2 严格 `RuntimeSnapshot` 与两个窗口一致的旧序号拒绝。
+- [x] P6.3：以失败测试锁定 Rust 专用教程气泡指令，移除前端语料、`pet_clicked` 与 `pet://bubble`。
+- [x] P6.4：运行 TypeScript、Rust、共享夹具和完整回归；记录 Windows 验收豁免。
+
+### P6 执行约束
+
+- 本轮采用破坏性 `protocolVersion: 2` 迁移；运行时不保留 v1 回退。
+- 本轮只修复 M1/M2 权威与协议前置条件，不实现 M3 语料、权重、冷却、ambient 或其他互动策略。
+- 用户明确豁免本轮 M2 原生 Windows 手工验收；该验收仍未执行，不能标记为已通过。
+
+### P6 TDD、回归与审查记录
+
+- P6.2 红：`npm test -- src/runtime-snapshot-receiver.test.ts` 因缺少 `runtime-snapshot-receiver` 模块失败；绿：共享接收器拒绝旧序号，`PlanPlayer` 和教程气泡均复用它。
+- P6.3 红：`CARGO_TARGET_DIR=/tmp/yunwei-p6-red-model cargo test --manifest-path src-tauri/Cargo.toml tutorial_bubble_directive_requires_a_v2_id_sequence_and_consistent_visibility` 因 `TutorialBubbleDirective` 不存在报 E0422；绿：v2 指令模型、Rust 文案生产与 TypeScript 呈现器通过。
+- P6.1：`planner_placement` 纯测试确认设置锚点在 planner footing 上；启动、更新、重置均先 `reanchor`，仅 `apply_m1_position` 写入窗口位置。
+- 协议：MotionPlan、RuntimeSnapshot、输入、动画与教程指令统一为 v2；夹具更新为 v2，v1/未知版本由严格解析安全拒绝。
+- 回归：`npm run check`（8 文件、28 用例）通过；默认 `cargo test --manifest-path src-tauri/Cargo.toml` 仍受既有 `/home/adduser/desktop` Tauri 权限缓存路径阻断，隔离 `CARGO_TARGET_DIR=/tmp/yunwei-p6-verify cargo test --manifest-path src-tauri/Cargo.toml`（23 用例）通过；`git diff --check` 通过。
+- 审查：两路只读审查先发现 bubble 启动晚于隐藏快照会误显示、以及 `SettingsPatch.tutorialStep` 可造成指令不同步；已改为启动补拉并序号消费权威快照，且移除该外部设置字段并补回归。README 与架构协议说明同步为 v2、无旧事件回退。
+- Windows：按用户明确指示，本轮未执行 M2 原生 Windows 10/11 手工验收；M2.6 继续保持未完成。
+
 ## M2 生活在 Windows 里（自动验证完成；Windows 原生验收待执行，2026-08-04）
 
 - [x] M2.1：以 fake `EnvironmentPort` / `WindowPort` 建立环境快照、纯策略与薄 Windows 适配层。

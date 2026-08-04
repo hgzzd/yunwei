@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AnimationObservation, InputObservation, RuntimeSnapshot, WindowKind } from "./pet-model";
+import { PROTOCOL_VERSION, type AnimationObservation, type InputObservation, type RuntimeSnapshot, type WindowKind } from "./pet-model";
 
 export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
@@ -47,7 +47,7 @@ export async function safeListen<T>(
 }
 
 export function observeInput(observation: InputObservation): Promise<void | undefined> {
-  return safeInvoke<void>("input_observed", { protocolVersion: 1, observation });
+  return safeInvoke<void>("input_observed", { protocolVersion: PROTOCOL_VERSION, observation });
 }
 
 export function observeAnimation(observation: AnimationObservation): Promise<void | undefined> {

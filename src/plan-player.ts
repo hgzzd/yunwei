@@ -1,4 +1,5 @@
-import { isRuntimeVisible, parseMotionPlan, parseRuntimeSnapshot, type MotionPlan, type PresentationPhase, type RuntimeSnapshot, type WorldPoint } from "./pet-model";
+import { parseMotionPlan, parseRuntimeSnapshot, type MotionPlan, type PresentationPhase, type RuntimeSnapshot, type WorldPoint } from "./pet-model";
+import { RuntimeSnapshotReceiver } from "./runtime-snapshot-receiver";
 
 export interface PlanSample {
   planId: number;
@@ -9,30 +10,30 @@ export interface PlanSample {
 }
 
 export class PlanPlayer {
-  private sequence = 0;
+  private planSequence = 0;
   private plan: MotionPlan | null = null;
-  private runtimeSnapshot: RuntimeSnapshot | null = null;
+  private readonly snapshots = new RuntimeSnapshotReceiver();
 
   acceptMotionPlan(payload: unknown): boolean {
     const plan = parseMotionPlan(payload);
-    if (!plan || plan.sequence <= this.sequence) return false;
-    this.sequence = plan.sequence;
+    if (!plan || plan.sequence <= this.planSequence || plan.sequence <= (this.snapshots.current()?.snapshot.sequence ?? 0)) return false;
+    this.planSequence = plan.sequence;
     this.plan = plan;
     return true;
   }
 
   acceptRuntimeSnapshot(payload: unknown): boolean {
     const snapshot = parseRuntimeSnapshot(payload);
-    if (!snapshot || snapshot.sequence <= this.sequence) return false;
+    if (!snapshot) return false;
     if (snapshot.activePlan && this.plan && snapshot.activePlan.sequence < this.plan.sequence) return false;
-    this.sequence = snapshot.sequence;
-    this.runtimeSnapshot = snapshot;
+    if (!this.snapshots.accept(snapshot)) return false;
+    this.planSequence = Math.max(this.planSequence, snapshot.activePlan?.sequence ?? 0);
     this.plan = snapshot.activePlan ?? null;
     return true;
   }
 
-  snapshot(): RuntimeSnapshot | null { return this.runtimeSnapshot; }
-  isVisible(): boolean { return isRuntimeVisible(this.runtimeSnapshot); }
+  snapshot(): RuntimeSnapshot | null { return this.snapshots.current()?.snapshot ?? null; }
+  isVisible(): boolean { return this.snapshots.current()?.visible ?? true; }
 
   sample(nowMs: number): PlanSample | null {
     if (!this.plan || !this.isVisible()) return null;

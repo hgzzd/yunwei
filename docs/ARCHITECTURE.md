@@ -58,18 +58,18 @@ TypeScript + Canvas      TypeScript + DOM/CSS
 
 ```ts
 type NativeToWeb =
-  | { protocolVersion: 1; sequence: number; kind: "renderDirective"; directive: RenderDirective }
-  | { protocolVersion: 1; sequence: number; kind: "motionPlan"; plan: MotionPlan }
-  | { protocolVersion: 1; sequence: number; kind: "bubbleDirective"; bubble: BubbleDirective }
-  | { protocolVersion: 1; sequence: number; kind: "runtimeSnapshot"; snapshot: RuntimeSnapshot };
+  | { protocolVersion: 2; sequence: number; kind: "renderDirective"; directive: RenderDirective }
+  | { protocolVersion: 2; sequence: number; kind: "motionPlan"; plan: MotionPlan }
+  | { protocolVersion: 2; sequence: number; kind: "bubbleDirective"; bubble: BubbleDirective }
+  | { protocolVersion: 2; sequence: number; kind: "runtimeSnapshot"; snapshot: RuntimeSnapshot };
 
 type WebToNative =
-  | { protocolVersion: 1; kind: "inputObserved"; observation: InputObservation }
-  | { protocolVersion: 1; kind: "animationObserved"; observation: AnimationObservation }
-  | { protocolVersion: 1; kind: "settingsRequested"; patch: SettingsPatch };
+  | { protocolVersion: 2; kind: "inputObserved"; observation: InputObservation }
+  | { protocolVersion: 2; kind: "animationObserved"; observation: AnimationObservation }
+  | { protocolVersion: 2; kind: "settingsRequested"; patch: SettingsPatch };
 ```
 
-协议实施时保留现有 `pet://state`、`pet://settings`、`pet://visibility`、`pet://bubble` 的兼容迁移路径；在一次里程碑中完成生产者、消费者和测试切换，不做半协议状态。
+本次协议采用破坏性 v2 切换：生产者、消费者和共享夹具同步升级，运行时不保留 `pet://state`、`pet://bubble` 或 v1 兼容回退路径。
 
 ## 坐标与窗口模型
 
@@ -85,4 +85,3 @@ Windows API 必须藏在窄 trait 后，例如 `EnvironmentPort`、`WindowPort`�
 ## 现有代码与目标差距
 
 当前 `BehaviorEngine` 已含随机状态、拖拽和点击，`lib.rs` 已持有位置与全屏逻辑；但尚未形成分离的高层计划/表现状态机、版本化运动协议、完整跳跃阶段、可替换 Windows 环境端口、前台窗口落脚策略、互动语料策略、设置页和结构化日志。M1–M4 依次收敛这些差距。
-

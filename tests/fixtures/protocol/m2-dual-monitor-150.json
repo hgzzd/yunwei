@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "sequence": 42,
   "behavior": "landing",
   "position": { "monitorId": "primary", "xLogical": 320, "yLogical": 860 },

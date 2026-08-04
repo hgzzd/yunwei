@@ -1,12 +1,7 @@
 import placeholderUrl from "./assets/yunwei-placeholder.svg";
 import { GestureTracker, type GestureAction, type PointerPoint } from "./gesture";
 import {
-  normalizeBubbleMessage,
-  isRuntimeVisible,
-  parseRuntimeSnapshot,
-  normalizeTutorialStep,
-  tutorialText,
-  type BubbleMessage,
+  PROTOCOL_VERSION,
   type PetSettings,
   type PresentationPhase,
   type RenderState,
@@ -17,6 +12,7 @@ import { PlanPlayer } from "./plan-player";
 import { fetchSpriteManifest } from "./sprite-manifest";
 import { currentWindowKind, getAuthoritativeRuntimeSnapshot, observeAnimation, observeInput, safeInvoke, safeListen } from "./tauri-bridge";
 import { PetAudioPlayer, SoundGate } from "./pet-audio";
+import { TutorialBubblePresenter } from "./tutorial-bubble-presenter";
 
 const DEFAULT_MANIFEST: SpriteManifest = {
   imageUrl: placeholderUrl,
@@ -96,7 +92,7 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
     if (sample && sample.phase !== renderedPlanPhase) {
       if (observedPlan && (observedPlan.id !== sample.planId || observedPlan.phase !== sample.phase)) {
         void observeAnimation({
-          protocolVersion: 1, planId: observedPlan.id, phase: observedPlan.phase,
+          protocolVersion: PROTOCOL_VERSION, planId: observedPlan.id, phase: observedPlan.phase,
         });
       }
       observedPlan = { id: sample.planId, phase: sample.phase };
@@ -112,7 +108,6 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
   const gesture = new GestureTracker(6);
   const soundGate = new SoundGate();
   const audio = new PetAudioPlayer();
-  let tutorialStep = 0;
   let pendingDragMove: PointerPoint | null = null;
   let dragFrame = 0;
 
@@ -136,8 +131,7 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
       const { point } = action;
       if (action.kind === "click") {
         audio.play(soundGate.clicked(performance.now()));
-        void safeInvoke("pet_clicked");
-        if (tutorialStep === 0) advanceTutorial(1);
+        void observeInput({ kind: "singleClick" });
       } else if (action.kind === "dragStart") {
         document.body.classList.add("is-dragging");
         void observeInput({
@@ -154,14 +148,8 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
         void observeInput({
           kind: "dragEnded", pointerXPhysical: point.screenX, pointerYPhysical: point.screenY,
         });
-        if (tutorialStep === 1) advanceTutorial(2);
       }
     }
-  };
-
-  const advanceTutorial = (step: number): void => {
-    tutorialStep = step;
-    void safeInvoke("tutorial_advanced", { step });
   };
 
   stage.addEventListener("pointerdown", (event) => {
@@ -178,18 +166,15 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
   stage.addEventListener("contextmenu", (event) => {
     event.preventDefault();
     void safeInvoke("show_context_menu");
-    if (tutorialStep === 2) advanceTutorial(3);
   });
   stage.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       audio.play(soundGate.clicked(performance.now()));
-      void safeInvoke("pet_clicked");
-      if (tutorialStep === 0) advanceTutorial(1);
+      void observeInput({ kind: "singleClick" });
     } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
       event.preventDefault();
       void safeInvoke("show_context_menu");
-      if (tutorialStep === 2) advanceTutorial(3);
     }
   });
 
@@ -206,7 +191,6 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
       stage.hidden = !visible;
     }),
     safeListen<PetSettings>("pet://settings", (settings) => {
-      tutorialStep = normalizeTutorialStep(settings?.tutorialStep);
       applySoundSetting(settings?.soundEnabled === true);
     }),
   ]);
@@ -218,7 +202,6 @@ async function startPetWindow(app: HTMLElement): Promise<void> {
   }
   visible = planPlayer.isVisible();
   stage.hidden = !visible;
-  tutorialStep = normalizeTutorialStep(settings?.tutorialStep);
   applySoundSetting(settings?.soundEnabled === true);
 
   window.addEventListener("beforeunload", () => {
@@ -246,53 +229,29 @@ async function startBubbleWindow(app: HTMLElement): Promise<void> {
   const bubble = app.querySelector<HTMLElement>(".bubble");
   if (!bubble) return;
 
-  let hideTimer = 0;
-  let tutorialStep = 3;
-  const show = (message: BubbleMessage): void => {
-    window.clearTimeout(hideTimer);
-    if (!message.visible || !message.text) {
-      bubble.hidden = true;
-      bubble.textContent = "";
-      return;
-    }
-    bubble.textContent = message.text;
-    bubble.dataset.kind = message.kind;
-    bubble.hidden = false;
-    if (message.kind !== "tutorial" && message.durationMs > 0) {
-      hideTimer = window.setTimeout(() => {
-        bubble.hidden = true;
-      }, message.durationMs);
-    }
-  };
-
-  const showTutorial = (step: number): void => {
-    tutorialStep = normalizeTutorialStep(step);
-    const text = tutorialText(tutorialStep);
-    show(text
-      ? { text, visible: true, kind: "tutorial", durationMs: 0 }
-      : { text: "", visible: false, kind: "tutorial", durationMs: 0 });
+  const presenter = new TutorialBubblePresenter();
+  const render = (): void => {
+    const view = presenter.current();
+    bubble.hidden = !view.visible;
+    bubble.textContent = view.text;
+    bubble.dataset.directiveId = view.id === null ? "" : String(view.id);
   };
 
   const unlisteners = await Promise.all([
-    safeListen<unknown>("pet://bubble", (payload) => {
-      const message = normalizeBubbleMessage(payload);
-      if (message) show(message);
-    }),
-    safeListen<PetSettings>("pet://settings", (settings) => {
-      showTutorial(settings?.tutorialStep);
+    safeListen<unknown>("pet://tutorial-bubble-directive", (payload) => {
+      if (presenter.acceptDirective(payload)) render();
     }),
     safeListen<unknown>("pet://runtime-snapshot", (payload) => {
-      const snapshot = parseRuntimeSnapshot(payload);
-      if (!snapshot || !isRuntimeVisible(snapshot)) show({ text: "", visible: false, kind: "speech", durationMs: 0 });
-      else if (tutorialStep < 3) showTutorial(tutorialStep);
+      if (presenter.acceptRuntimeSnapshot(payload)) render();
     }),
   ]);
 
-  const settings = await safeInvoke<PetSettings>("get_settings");
-  showTutorial(settings?.tutorialStep ?? 0);
+  const directive = await safeInvoke<unknown>("get_tutorial_bubble_directive");
+  if (presenter.acceptDirective(directive)) render();
+  const snapshot = await getAuthoritativeRuntimeSnapshot();
+  if (snapshot && presenter.acceptRuntimeSnapshot(snapshot)) render();
 
   window.addEventListener("beforeunload", () => {
-    window.clearTimeout(hideTimer);
     for (const unlisten of unlisteners) unlisten();
   }, { once: true });
 }

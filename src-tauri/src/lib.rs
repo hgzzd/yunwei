@@ -5,10 +5,13 @@ mod platform;
 mod settings;
 
 use behavior::{BehaviorPlanner, Lcg, PlannerConfig};
-use environment::{DisplayMode, EnvironmentPolicy, EnvironmentPort, RecoveryPosition, VisibilityReason};
+use environment::{
+    DisplayMode, EnvironmentPolicy, EnvironmentPort, RecoveryPosition, VisibilityReason,
+};
 use model::{
-    AnimationObservation, BubblePayload, Footing, FootingSource, PetScale, PetSettings,
-    InputObservation, M1_PROTOCOL_VERSION, RuntimeSnapshot, SettingsPatch, VisibilityPayload, WorldPoint,
+    AnimationObservation, Footing, FootingSource, InputObservation, PetScale, PetSettings,
+    RuntimeSnapshot, SettingsPatch, TutorialBubbleDirective, VisibilityPayload, WorldPoint,
+    PROTOCOL_VERSION,
 };
 use settings::SettingsStore;
 use std::{
@@ -42,6 +45,9 @@ struct RuntimeData {
     environment_policy: EnvironmentPolicy,
     drag: Option<DragState>,
     planner: BehaviorPlanner<Lcg>,
+    tutorial_bubble: TutorialBubbleDirective,
+    next_tutorial_bubble_id: u64,
+    next_tutorial_bubble_sequence: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -68,6 +74,13 @@ struct MonitorArea {
     width: u32,
     height: u32,
     scale_factor: f64,
+}
+
+struct PlannerPlacement {
+    area: MonitorArea,
+    pet_size_physical: u32,
+    footing: Footing,
+    anchor: WorldPoint,
 }
 
 impl MonitorArea {
@@ -115,8 +128,10 @@ fn apply_window_visibility<R: Runtime>(app: &AppHandle<R>, data: &RuntimeData) {
     if let Some(bubble) = app.get_webview_window(BUBBLE_WINDOW) {
         if !visible {
             let _ = bubble.hide();
-        } else if data.settings.tutorial_step < 3 {
+        } else if data.tutorial_bubble.visible {
             let _ = bubble.show();
+        } else {
+            let _ = bubble.hide();
         }
     }
     emit_visibility(app, data);
@@ -131,6 +146,65 @@ fn save_settings(state: &CoreState, settings: &PetSettings) -> Result<(), String
 
 fn emit_settings<R: Runtime>(app: &AppHandle<R>, settings: &PetSettings) {
     let _ = app.emit("pet://settings", settings.clone());
+}
+
+fn tutorial_text(step: u8) -> Option<&'static str> {
+    ["点我一下？", "还能拖我走！", "右键能管住我。"]
+        .get(usize::from(step))
+        .copied()
+}
+
+fn tutorial_directive(step: u8, id: u64, sequence: u64) -> TutorialBubbleDirective {
+    TutorialBubbleDirective {
+        protocol_version: PROTOCOL_VERSION,
+        sequence,
+        id,
+        visible: tutorial_text(step).is_some(),
+        text: tutorial_text(step).map(str::to_owned),
+    }
+}
+
+fn replace_tutorial_directive(data: &mut RuntimeData) {
+    data.tutorial_bubble = tutorial_directive(
+        data.settings.tutorial_step,
+        data.next_tutorial_bubble_id,
+        data.next_tutorial_bubble_sequence,
+    );
+    data.next_tutorial_bubble_id = data.next_tutorial_bubble_id.saturating_add(1);
+    data.next_tutorial_bubble_sequence = data.next_tutorial_bubble_sequence.saturating_add(1);
+}
+
+fn emit_tutorial_bubble<R: Runtime>(app: &AppHandle<R>, data: &RuntimeData) {
+    debug_assert!(data.tutorial_bubble.validate().is_ok());
+    let _ = app.emit(
+        "pet://tutorial-bubble-directive",
+        data.tutorial_bubble.clone(),
+    );
+    if let Some(window) = app.get_webview_window(BUBBLE_WINDOW) {
+        if effective_visible(data) && data.tutorial_bubble.visible {
+            let _ = window.show();
+        } else {
+            let _ = window.hide();
+        }
+    }
+}
+
+fn advance_tutorial_if_expected<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &CoreState,
+    data: &mut RuntimeData,
+    expected_step: u8,
+    next_step: u8,
+) -> Result<(), String> {
+    if data.settings.tutorial_step != expected_step {
+        return Ok(());
+    }
+    data.settings.tutorial_step = next_step;
+    replace_tutorial_directive(data);
+    save_settings(state, &data.settings)?;
+    emit_settings(app, &data.settings);
+    emit_tutorial_bubble(app, data);
+    Ok(())
 }
 
 fn emit_m1_snapshot<R: Runtime>(app: &AppHandle<R>, data: &mut RuntimeData, now_ms: u64) {
@@ -256,23 +330,44 @@ fn place_bubble<R: Runtime>(app: &AppHandle<R>, pet_x: i32, pet_y: i32, area: &M
     let _ = bubble.set_position(PhysicalPosition::new(x, y));
 }
 
-fn position_from_settings<R: Runtime>(
+fn planner_placement(settings: &PetSettings, area: MonitorArea) -> PlannerPlacement {
+    let pet_size_physical = physical_pet_size(settings.scale, &area);
+    let footing = m1_footing(&area, pet_size_physical);
+    let x = x_from_normalized(&area, pet_size_physical, settings.normalized_x);
+    let anchor = m1_world_point(
+        &area,
+        pet_size_physical,
+        x,
+        area.y + area.height as i32 - pet_size_physical as i32,
+    );
+    PlannerPlacement {
+        area,
+        pet_size_physical,
+        footing,
+        anchor,
+    }
+}
+
+fn reanchor_from_settings<R: Runtime>(
     app: &AppHandle<R>,
-    settings: &mut PetSettings,
+    data: &mut RuntimeData,
+    now_ms: u64,
 ) -> Result<(), String> {
     let pet = app
         .get_webview_window(PET_WINDOW)
         .ok_or_else(|| "pet 窗口不存在".to_string())?;
-    let area = selected_monitor(&pet, settings.monitor_id.as_deref())?;
-    let size = physical_pet_size(settings.scale, &area);
-    let x = x_from_normalized(&area, size, settings.normalized_x);
-    let y = area.y + area.height as i32 - size as i32;
-    pet.set_size(PhysicalSize::new(size, size))
-        .map_err(|error| error.to_string())?;
-    pet.set_position(PhysicalPosition::new(x, y))
-        .map_err(|error| error.to_string())?;
-    settings.monitor_id = Some(area.id.clone());
-    place_bubble(app, x, y, &area);
+    let area = selected_monitor(&pet, data.settings.monitor_id.as_deref())?;
+    let placement = planner_placement(&data.settings, area);
+    pet.set_size(PhysicalSize::new(
+        placement.pet_size_physical,
+        placement.pet_size_physical,
+    ))
+    .map_err(|error| error.to_string())?;
+    data.settings.monitor_id = Some(placement.area.id.clone());
+    data.planner
+        .reanchor(now_ms, placement.footing, placement.anchor);
+    apply_m1_position(app, &data.planner.position_at(now_ms));
+    emit_m1_plan(app, data, now_ms);
     Ok(())
 }
 
@@ -312,6 +407,11 @@ fn get_runtime_snapshot(state: State<'_, CoreState>) -> RuntimeSnapshot {
 }
 
 #[tauri::command]
+fn get_tutorial_bubble_directive(state: State<'_, CoreState>) -> TutorialBubbleDirective {
+    lock_runtime(&state).tutorial_bubble.clone()
+}
+
+#[tauri::command]
 fn update_settings(
     app: AppHandle,
     state: State<'_, CoreState>,
@@ -324,7 +424,7 @@ fn update_settings(
 
     let mut data = lock_runtime(&state);
     patch.apply(&mut data.settings);
-    position_from_settings(&app, &mut data.settings)?;
+    reanchor_from_settings(&app, &mut data, current_ms())?;
     save_settings(&state, &data.settings)?;
     sync_menu(&app, &data);
     emit_settings(&app, &data.settings);
@@ -436,7 +536,7 @@ fn reset_pet_position(app: AppHandle, state: State<'_, CoreState>) -> Result<Pet
     let mut data = lock_runtime(&state);
     data.settings.monitor_id = None;
     data.settings.normalized_x = PetSettings::default().normalized_x;
-    position_from_settings(&app, &mut data.settings)?;
+    reanchor_from_settings(&app, &mut data, current_ms())?;
     save_settings(&state, &data.settings)?;
     emit_settings(&app, &data.settings);
     Ok(data.settings.clone())
@@ -476,7 +576,10 @@ fn drag_pet(
 ) -> Result<(), String> {
     let (drag, footing) = {
         let data = lock_runtime(&state);
-        (data.drag.ok_or_else(|| "尚未开始拖动".to_string())?, data.planner.footing().clone())
+        (
+            data.drag.ok_or_else(|| "尚未开始拖动".to_string())?,
+            data.planner.footing().clone(),
+        )
     };
     let pet = app
         .get_webview_window(PET_WINDOW)
@@ -515,12 +618,24 @@ fn end_drag(
     let plan = data.planner.land_after_drag(now_ms);
     let footing = data.planner.footing().clone();
     data.settings.normalized_x = if footing.max_x_logical > footing.min_x_logical {
-        ((plan.to.x_logical - footing.min_x_logical) / (footing.max_x_logical - footing.min_x_logical)).clamp(0.0, 1.0)
-    } else { 0.0 };
+        ((plan.to.x_logical - footing.min_x_logical)
+            / (footing.max_x_logical - footing.min_x_logical))
+            .clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     data.settings.monitor_id = Some(footing.monitor_id);
     emit_m1_plan(&app, &mut data, now_ms);
+    let advanced_tutorial = data.settings.tutorial_step == 1;
+    if advanced_tutorial {
+        data.settings.tutorial_step = 2;
+        replace_tutorial_directive(&mut data);
+    }
     save_settings(&state, &data.settings)?;
     emit_settings(&app, &data.settings);
+    if advanced_tutorial {
+        emit_tutorial_bubble(&app, &data);
+    }
     Ok(data.settings.clone())
 }
 
@@ -531,96 +646,63 @@ fn input_observed(
     protocol_version: u8,
     observation: InputObservation,
 ) -> Result<(), String> {
-    if protocol_version != M1_PROTOCOL_VERSION {
-        eprintln!("[m1 protocol] ignored unsupported input version {protocol_version}");
+    if protocol_version != PROTOCOL_VERSION {
+        eprintln!("[protocol] ignored unsupported input version {protocol_version}");
         return Ok(());
     }
     match observation {
-        InputObservation::DragStarted { pointer_x_physical, pointer_y_physical } => begin_drag(app, state, pointer_x_physical, pointer_y_physical),
-        InputObservation::DragMoved { pointer_x_physical, pointer_y_physical } => {
-            drag_pet(app, state, pointer_x_physical, pointer_y_physical)
+        InputObservation::SingleClick => {
+            let mut data = lock_runtime(&state);
+            advance_tutorial_if_expected(&app, &state, &mut data, 0, 1)
         }
-        InputObservation::DragEnded { pointer_x_physical, pointer_y_physical } => end_drag(app, state, pointer_x_physical, pointer_y_physical).map(|_| ()),
+        InputObservation::DragStarted {
+            pointer_x_physical,
+            pointer_y_physical,
+        } => begin_drag(app, state, pointer_x_physical, pointer_y_physical),
+        InputObservation::DragMoved {
+            pointer_x_physical,
+            pointer_y_physical,
+        } => drag_pet(app, state, pointer_x_physical, pointer_y_physical),
+        InputObservation::DragEnded {
+            pointer_x_physical,
+            pointer_y_physical,
+        } => end_drag(app, state, pointer_x_physical, pointer_y_physical).map(|_| ()),
     }
 }
 
 #[tauri::command]
 fn animation_observed(state: State<'_, CoreState>, observation: AnimationObservation) {
-    if observation.protocol_version != M1_PROTOCOL_VERSION {
-        eprintln!("[m1 protocol] ignored unsupported animation version");
+    if observation.protocol_version != PROTOCOL_VERSION {
+        eprintln!("[protocol] ignored unsupported animation version");
         return;
     }
     let data = lock_runtime(&state);
     if data.planner.active_plan().id != observation.plan_id {
-        eprintln!("[m1 protocol] ignored stale animation for plan {}", observation.plan_id);
+        eprintln!(
+            "[m1 protocol] ignored stale animation for plan {}",
+            observation.plan_id
+        );
     }
 }
 
 #[tauri::command]
-fn pet_clicked(app: AppHandle, state: State<'_, CoreState>) -> Result<(), String> {
-    let data = lock_runtime(&state);
-    let bubble = BubblePayload { visible: true, text: Some("抓到你啦".into()), duration_ms: 4_000 };
-    if data.settings.tutorial_step >= 3 {
-        show_bubble(&app, &bubble);
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn tutorial_advanced(
+fn show_context_menu(
     app: AppHandle,
     state: State<'_, CoreState>,
-    step: u8,
-) -> Result<PetSettings, String> {
-    let mut data = lock_runtime(&state);
-    data.settings.tutorial_step = step.min(3);
-    save_settings(&state, &data.settings)?;
-    emit_settings(&app, &data.settings);
-    if let Some(bubble) = app.get_webview_window(BUBBLE_WINDOW) {
-        if effective_visible(&data) && data.settings.tutorial_step < 3 {
-            let _ = bubble.show();
-        } else {
-            let _ = bubble.hide();
-        }
-    }
-    Ok(data.settings.clone())
-}
-
-#[tauri::command]
-fn show_context_menu(app: AppHandle, menus: State<'_, MenuHandles>) -> Result<(), String> {
+    menus: State<'_, MenuHandles>,
+) -> Result<(), String> {
     let pet = app
         .get_webview_window(PET_WINDOW)
         .ok_or_else(|| "pet 窗口不存在".to_string())?;
     pet.popup_menu(&menus.menu)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let mut data = lock_runtime(&state);
+    advance_tutorial_if_expected(&app, &state, &mut data, 2, 3)
 }
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
-}
-
-fn show_bubble<R: Runtime>(app: &AppHandle<R>, payload: &BubblePayload) {
-    let _ = app.emit("pet://bubble", payload.clone());
-    let Some(window) = app.get_webview_window(BUBBLE_WINDOW) else {
-        return;
-    };
-    if payload.visible {
-        if let Some(pet) = app.get_webview_window(PET_WINDOW) {
-            if let (Ok(position), Ok(size), Ok(areas)) =
-                (pet.outer_position(), pet.outer_size(), monitor_areas(&pet))
-            {
-                let center_x = f64::from(position.x) + f64::from(size.width) / 2.0;
-                let center_y = f64::from(position.y) + f64::from(size.height) / 2.0;
-                if let Some(area) = areas.iter().find(|area| area.contains(center_x, center_y)) {
-                    place_bubble(app, position.x, position.y, area);
-                }
-            }
-        }
-        let _ = window.show();
-    } else {
-        let _ = window.hide();
-    }
 }
 
 fn handle_menu(app: &AppHandle, id: &str) {
@@ -776,10 +858,16 @@ fn start_runtime(app: AppHandle) {
     });
 }
 
-fn apply_m1_position(app: &AppHandle, point: &WorldPoint) {
-    let Some(pet) = app.get_webview_window(PET_WINDOW) else { return; };
-    let Ok(areas) = monitor_areas(&pet) else { return; };
-    let Some(area) = areas.iter().find(|area| area.id == point.monitor_id) else { return; };
+fn apply_m1_position<R: Runtime>(app: &AppHandle<R>, point: &WorldPoint) {
+    let Some(pet) = app.get_webview_window(PET_WINDOW) else {
+        return;
+    };
+    let Ok(areas) = monitor_areas(&pet) else {
+        return;
+    };
+    let Some(area) = areas.iter().find(|area| area.id == point.monitor_id) else {
+        return;
+    };
     let x = area.x + (point.x_logical * area.scale_factor).round() as i32;
     let y = area.y + (point.y_logical * area.scale_factor).round() as i32;
     let _ = pet.set_position(PhysicalPosition::new(x, y));
@@ -813,12 +901,15 @@ fn update_windows_environment(app: &AppHandle) {
     let changed_visibility = data.visibility_reason != decision.visibility_reason;
     data.visibility_reason = decision.visibility_reason;
     if let Some(footing) = decision.footing {
-        if *data.planner.footing() != footing && data.planner.behavior() != model::BehaviorState::Dragged {
+        if *data.planner.footing() != footing
+            && data.planner.behavior() != model::BehaviorState::Dragged
+        {
             let x = if data.planner.position().monitor_id == footing.monitor_id {
                 data.planner.position_at(current_ms()).x_logical
             } else {
                 footing.min_x_logical
-                    + (footing.max_x_logical - footing.min_x_logical) * recovery.normalized_x.clamp(0.0, 1.0)
+                    + (footing.max_x_logical - footing.min_x_logical)
+                        * recovery.normalized_x.clamp(0.0, 1.0)
             };
             let point = WorldPoint::new(footing.monitor_id.clone(), x, footing.top_y_logical);
             data.planner.reanchor(current_ms(), footing, point);
@@ -868,20 +959,24 @@ pub fn run() {
                 settings.autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
             }
             configure_windows(app)?;
-            position_from_settings(app.handle(), &mut settings)?;
             let pet = app
                 .get_webview_window(PET_WINDOW)
                 .ok_or_else(|| tauri::Error::AssetNotFound(PET_WINDOW.into()))?;
             let area = selected_monitor(&pet, settings.monitor_id.as_deref())?;
-            let position = pet.outer_position()?;
-            let size = physical_pet_size(settings.scale, &area);
+            let placement = planner_placement(&settings, area);
+            settings.monitor_id = Some(placement.area.id.clone());
+            pet.set_size(PhysicalSize::new(
+                placement.pet_size_physical,
+                placement.pet_size_physical,
+            ))?;
             let planner = BehaviorPlanner::new(
                 PlannerConfig::default(),
                 Lcg::new(current_seed()),
-                m1_world_point(&area, size, position.x, position.y),
-                m1_footing(&area, size),
+                placement.anchor,
+                placement.footing,
                 current_ms(),
             );
+            let tutorial_bubble = tutorial_directive(settings.tutorial_step, 1, 1);
             store.save(&settings)?;
             app.manage(CoreState {
                 store,
@@ -892,13 +987,18 @@ pub fn run() {
                     environment_policy: EnvironmentPolicy::default(),
                     drag: None,
                     planner,
+                    tutorial_bubble,
+                    next_tutorial_bubble_id: 2,
+                    next_tutorial_bubble_sequence: 2,
                 }),
             });
             {
                 let state = app.state::<CoreState>();
                 let mut data = lock_runtime(&state);
+                apply_m1_position(app.handle(), &data.planner.position_at(current_ms()));
                 apply_window_visibility(app.handle(), &data);
                 emit_m1_snapshot(app.handle(), &mut data, current_ms());
+                emit_tutorial_bubble(app.handle(), &data);
             }
 
             let handles = create_menu(app)?;
@@ -919,6 +1019,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             get_runtime_snapshot,
+            get_tutorial_bubble_directive,
             update_settings,
             set_pet_visible,
             set_m2_environment_policy,
@@ -928,8 +1029,6 @@ pub fn run() {
             reset_pet_position,
             input_observed,
             animation_observed,
-            pet_clicked,
-            tutorial_advanced,
             show_context_menu,
             quit_app,
         ]);
@@ -973,6 +1072,25 @@ mod tests {
     }
 
     #[test]
+    fn settings_reanchor_builds_a_planner_owned_desktop_footing() {
+        let settings = PetSettings::default();
+        let placement = planner_placement(
+            &settings,
+            MonitorArea {
+                id: "primary".into(),
+                x: -1920,
+                y: 40,
+                width: 1920,
+                height: 1040,
+                scale_factor: 1.5,
+            },
+        );
+        assert_eq!(placement.anchor.monitor_id, "primary");
+        assert_eq!(placement.anchor.y_logical, placement.footing.top_y_logical);
+        assert!(placement.footing.contains(&placement.anchor));
+    }
+
+    #[test]
     fn manual_hide_has_priority_over_fullscreen_restore() {
         let footing = Footing {
             id: "desktop".into(),
@@ -995,6 +1113,9 @@ mod tests {
                 footing,
                 0,
             ),
+            tutorial_bubble: tutorial_directive(0, 1, 1),
+            next_tutorial_bubble_id: 2,
+            next_tutorial_bubble_sequence: 2,
         };
         assert!(!effective_visible(&data));
     }

@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use crate::environment::{DisplayMode, VisibilityReason};
+use serde::{Deserialize, Serialize};
 
 pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
-pub const M1_PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,7 +29,7 @@ pub enum PresentationPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldPoint {
     pub monitor_id: String,
     pub x_logical: f64,
@@ -38,11 +38,17 @@ pub struct WorldPoint {
 
 impl WorldPoint {
     pub fn new(monitor_id: impl Into<String>, x_logical: f64, y_logical: f64) -> Self {
-        Self { monitor_id: monitor_id.into(), x_logical, y_logical }
+        Self {
+            monitor_id: monitor_id.into(),
+            x_logical,
+            y_logical,
+        }
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.monitor_id.trim().is_empty() && self.x_logical.is_finite() && self.y_logical.is_finite()
+        !self.monitor_id.trim().is_empty()
+            && self.x_logical.is_finite()
+            && self.y_logical.is_finite()
     }
 }
 
@@ -54,7 +60,7 @@ pub enum FootingSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Footing {
     pub id: String,
     pub monitor_id: String,
@@ -68,7 +74,9 @@ impl Footing {
     pub fn clamp(&self, point: &WorldPoint) -> WorldPoint {
         WorldPoint::new(
             self.monitor_id.clone(),
-            point.x_logical.clamp(self.min_x_logical, self.max_x_logical),
+            point
+                .x_logical
+                .clamp(self.min_x_logical, self.max_x_logical),
             self.top_y_logical,
         )
     }
@@ -100,7 +108,7 @@ pub enum MotionKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MotionArc {
     pub apex: WorldPoint,
     pub start_offset_ms: u64,
@@ -108,7 +116,7 @@ pub struct MotionArc {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PhaseSlice {
     pub phase: PresentationPhase,
     pub start_offset_ms: u64,
@@ -117,12 +125,16 @@ pub struct PhaseSlice {
 
 impl PhaseSlice {
     pub fn new(phase: PresentationPhase, start_offset_ms: u64, duration_ms: u64) -> Self {
-        Self { phase, start_offset_ms, duration_ms }
+        Self {
+            phase,
+            start_offset_ms,
+            duration_ms,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MotionPlan {
     pub protocol_version: u8,
     pub sequence: u64,
@@ -139,14 +151,17 @@ pub struct MotionPlan {
 
 impl MotionPlan {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.protocol_version != M1_PROTOCOL_VERSION
+        if self.protocol_version != PROTOCOL_VERSION
             || self.sequence == 0
             || self.id == 0
             || self.duration_ms == 0
         {
             return Err("version, id, or duration is invalid");
         }
-        if !self.from.is_valid() || !self.to.is_valid() || self.from.monitor_id != self.to.monitor_id {
+        if !self.from.is_valid()
+            || !self.to.is_valid()
+            || self.from.monitor_id != self.to.monitor_id
+        {
             return Err("points are invalid");
         }
         let mut expected_start = 0;
@@ -173,7 +188,7 @@ impl MotionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeSnapshot {
     pub protocol_version: u8,
     pub sequence: u64,
@@ -181,20 +196,20 @@ pub struct RuntimeSnapshot {
     pub position: WorldPoint,
     pub footing: Footing,
     pub active_plan: Option<MotionPlan>,
-    #[serde(default)]
     pub display_mode: DisplayMode,
-    #[serde(default)]
     pub manually_hidden: bool,
-    #[serde(default)]
     pub visibility_reason: Option<VisibilityReason>,
 }
 
 impl RuntimeSnapshot {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.protocol_version != M1_PROTOCOL_VERSION || self.sequence == 0 {
+        if self.protocol_version != PROTOCOL_VERSION || self.sequence == 0 {
             return Err("snapshot version or sequence is invalid");
         }
-        if !self.position.is_valid() || !self.footing.is_valid() || self.position.monitor_id != self.footing.monitor_id {
+        if !self.position.is_valid()
+            || !self.footing.is_valid()
+            || self.position.monitor_id != self.footing.monitor_id
+        {
             return Err("snapshot position or footing is invalid");
         }
         if let Some(plan) = &self.active_plan {
@@ -213,9 +228,19 @@ impl RuntimeSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum InputObservation {
-    DragStarted { pointer_x_physical: f64, pointer_y_physical: f64 },
-    DragMoved { pointer_x_physical: f64, pointer_y_physical: f64 },
-    DragEnded { pointer_x_physical: f64, pointer_y_physical: f64 },
+    SingleClick,
+    DragStarted {
+        pointer_x_physical: f64,
+        pointer_y_physical: f64,
+    },
+    DragMoved {
+        pointer_x_physical: f64,
+        pointer_y_physical: f64,
+    },
+    DragEnded {
+        pointer_x_physical: f64,
+        pointer_y_physical: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -297,7 +322,6 @@ pub struct SettingsPatch {
     pub autostart_enabled: Option<bool>,
     pub monitor_id: Option<Option<String>>,
     pub normalized_x: Option<f64>,
-    pub tutorial_step: Option<u8>,
 }
 
 impl SettingsPatch {
@@ -316,9 +340,6 @@ impl SettingsPatch {
         }
         if let Some(value) = self.normalized_x {
             settings.normalized_x = value;
-        }
-        if let Some(value) = self.tutorial_step {
-            settings.tutorial_step = value;
         }
         settings.normalize();
     }
@@ -340,12 +361,27 @@ impl Facing {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BubblePayload {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TutorialBubbleDirective {
+    pub protocol_version: u8,
+    pub sequence: u64,
+    pub id: u64,
     pub visible: bool,
     pub text: Option<String>,
-    pub duration_ms: u64,
+}
+
+impl TutorialBubbleDirective {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.protocol_version != PROTOCOL_VERSION || self.sequence == 0 || self.id == 0 {
+            return Err("tutorial directive version, id, or sequence is invalid");
+        }
+        match (self.visible, self.text.as_deref()) {
+            (true, Some(text)) if !text.trim().is_empty() => Ok(()),
+            (false, None) => Ok(()),
+            _ => Err("tutorial directive visibility and text are inconsistent"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -363,7 +399,7 @@ mod tests {
     #[test]
     fn m1_motion_plan_requires_a_contiguous_phase_schedule() {
         let plan = MotionPlan {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             sequence: 7,
             id: 3,
             kind: MotionKind::Jump,
@@ -392,26 +428,35 @@ mod tests {
 
     #[test]
     fn m1_shared_jump_fixture_is_valid_for_rust_producer_and_consumer() {
-        let plan: MotionPlan = serde_json::from_str(include_str!("../../tests/fixtures/protocol/m1-jump.json"))
-            .expect("shared jump fixture parses");
+        let plan: MotionPlan =
+            serde_json::from_str(include_str!("../../tests/fixtures/protocol/m1-jump.json"))
+                .expect("shared jump fixture parses");
         assert!(plan.validate().is_ok());
-        assert_eq!(serde_json::to_value(plan).unwrap()["protocolVersion"], 1);
+        assert_eq!(
+            serde_json::to_value(plan).unwrap()["protocolVersion"],
+            PROTOCOL_VERSION
+        );
     }
 
     #[test]
     fn m1_shared_startup_snapshot_fixture_is_valid() {
-        let snapshot: RuntimeSnapshot = serde_json::from_str(include_str!("../../tests/fixtures/protocol/m1-startup-snapshot.json"))
-            .expect("shared startup snapshot parses");
+        let snapshot: RuntimeSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/protocol/m1-startup-snapshot.json"
+        ))
+        .expect("shared startup snapshot parses");
         assert!(snapshot.validate().is_ok());
     }
 
     #[test]
-    fn m2_runtime_snapshot_defaults_legacy_environment_fields() {
-        let snapshot: RuntimeSnapshot = serde_json::from_str(include_str!("../../tests/fixtures/protocol/m1-startup-snapshot.json"))
-            .expect("legacy snapshot parses");
-        assert_eq!(snapshot.display_mode, crate::environment::DisplayMode::AboveNormalWindows);
-        assert!(!snapshot.manually_hidden);
-        assert_eq!(snapshot.visibility_reason, None);
+    fn m2_runtime_snapshot_requires_explicit_environment_fields() {
+        let snapshot: RuntimeSnapshot = serde_json::from_str(include_str!(
+            "../../tests/fixtures/protocol/m1-startup-snapshot.json"
+        ))
+        .expect("v2 snapshot parses");
+        assert_eq!(
+            snapshot.display_mode,
+            crate::environment::DisplayMode::AboveNormalWindows
+        );
     }
 
     #[test]
@@ -424,10 +469,12 @@ mod tests {
 
     #[test]
     fn m1_rejects_unknown_versions_and_invalid_coordinates() {
-        let mut plan: MotionPlan = serde_json::from_str(include_str!("../../tests/fixtures/protocol/m1-jump.json")).unwrap();
-        plan.protocol_version = 2;
+        let mut plan: MotionPlan =
+            serde_json::from_str(include_str!("../../tests/fixtures/protocol/m1-jump.json"))
+                .unwrap();
+        plan.protocol_version = 3;
         assert!(plan.validate().is_err());
-        plan.protocol_version = M1_PROTOCOL_VERSION;
+        plan.protocol_version = PROTOCOL_VERSION;
         plan.to.x_logical = f64::NAN;
         assert!(plan.validate().is_err());
     }
@@ -437,15 +484,38 @@ mod tests {
         let mut settings = PetSettings::default();
         SettingsPatch {
             normalized_x: Some(9.0),
-            tutorial_step: Some(99),
             monitor_id: Some(Some("  ".into())),
             ..Default::default()
         }
         .apply(&mut settings);
 
         assert_eq!(settings.normalized_x, 1.0);
-        assert_eq!(settings.tutorial_step, 3);
+        assert_eq!(settings.tutorial_step, 0);
         assert_eq!(settings.monitor_id, None);
     }
 
+    #[test]
+    fn tutorial_bubble_directive_requires_a_v2_id_sequence_and_consistent_visibility() {
+        let visible = TutorialBubbleDirective {
+            protocol_version: PROTOCOL_VERSION,
+            sequence: 1,
+            id: 1,
+            visible: true,
+            text: Some("点我一下？".into()),
+        };
+        assert!(visible.validate().is_ok());
+
+        assert!(TutorialBubbleDirective {
+            protocol_version: 1,
+            ..visible.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(TutorialBubbleDirective {
+            visible: false,
+            ..visible
+        }
+        .validate()
+        .is_err());
+    }
 }

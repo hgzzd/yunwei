@@ -45,7 +45,7 @@
 
 ### 运行时分工
 
-- **Rust 主进程**：`src-tauri/src/lib.rs` 维护单一运行时状态。约每 33 ms 更新可见宠物的行为和位置；隐藏时降低检查频率。它通过 Tauri event 向两个前端窗口广播 `pet://state`、`pet://settings`、`pet://visibility` 与 `pet://bubble`。
+- **Rust 主进程**：`src-tauri/src/lib.rs` 维护单一运行时状态。约每 33 ms 更新可见宠物的行为和位置；隐藏时降低检查频率。它通过 Tauri event 向两个前端窗口广播 `pet://motion-plan`、`pet://runtime-snapshot`、`pet://settings`、`pet://visibility` 与 Rust 下发的 `pet://tutorial-bubble-directive`。
 - **行为状态机**：`src-tauri/src/behavior.rs` 在 15–45 秒间随机切换动作，在 3–8 分钟间随机显示一句台词。点击会触发摔跟头和固定气泡；拖动期间暂停随机状态切换。
 - **窗口与屏幕适配**：宠物固定在当前显示器工作区底部，位置以“横向归一化坐标 + 显示器标识”保存。拖拽结束后会识别目标显示器、按该显示器 DPI 换算窗口尺寸并落底；显示器变更后自动回退到可用屏幕。
 - **全屏避让**：Windows 上通过 `user32` 检查前台窗口是否覆盖其显示器；全屏时临时隐藏宠物与气泡，退出全屏后恢复。非 Windows 目标该检测为安全降级，不参与判断。

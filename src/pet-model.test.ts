@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  normalizeBubbleMessage,
+  parseTutorialBubbleDirective,
   parseMotionPlan,
   parseRuntimeSnapshot,
   isRuntimeVisible,
   normalizeRenderState,
-  normalizeTutorialStep,
-  tutorialText,
 } from "./pet-model";
 import startupSnapshot from "../tests/fixtures/protocol/m1-startup-snapshot.json";
 import invalidFacing from "../tests/fixtures/protocol/m1-invalid-facing.json";
@@ -25,67 +23,57 @@ describe("native payload normalization", () => {
     });
   });
 
-  it("normalizes bubble defaults and visibility", () => {
-    expect(normalizeBubbleMessage("今天也要摸鱼")).toEqual({
-      text: "今天也要摸鱼",
-      visible: true,
-      kind: "speech",
-      durationMs: 4_000,
-    });
-    expect(normalizeBubbleMessage({ text: "", visible: true })).toEqual({
-      text: "",
-      visible: false,
-      kind: "speech",
-      durationMs: 4_000,
-    });
-  });
-
-  it("keeps tutorial progress inside the supported range", () => {
-    expect(normalizeTutorialStep(-2)).toBe(0);
-    expect(normalizeTutorialStep(9)).toBe(3);
-    expect(tutorialText(0)).toBe("点我一下？");
-    expect(tutorialText(3)).toBeNull();
+  it("accepts only complete Rust-issued tutorial directives", () => {
+    expect(parseTutorialBubbleDirective({ protocolVersion: 2, sequence: 1, id: 1, visible: true, text: "点我一下？" }))
+      .toEqual({ protocolVersion: 2, sequence: 1, id: 1, visible: true, text: "点我一下？" });
+    expect(parseTutorialBubbleDirective({ protocolVersion: 2, sequence: 1, id: 1, visible: false, text: "本地文本" })).toBeNull();
+    expect(parseTutorialBubbleDirective({ protocolVersion: 1, sequence: 1, id: 1, visible: true, text: "旧协议" })).toBeNull();
   });
 
   it("accepts only complete versioned motion plans", () => {
     const plan = {
-      protocolVersion: 1, sequence: 1, id: 1, kind: "walk", startedAtMs: 0, durationMs: 100,
+      protocolVersion: 2, sequence: 1, id: 1, kind: "walk", startedAtMs: 0, durationMs: 100,
       from: { monitorId: "primary", xLogical: 0, yLogical: 10 }, to: { monitorId: "primary", xLogical: 10, yLogical: 10 }, facing: "right",
       phaseSchedule: [{ phase: "walkCycle", startOffsetMs: 0, durationMs: 100 }],
     };
     expect(parseMotionPlan(plan)?.kind).toBe("walk");
-    expect(parseMotionPlan({ ...plan, protocolVersion: 2 })).toBeNull();
+    expect(parseMotionPlan({ ...plan, protocolVersion: 1 })).toBeNull();
+    expect(parseMotionPlan({ ...plan, localFallback: true })).toBeNull();
     expect(parseMotionPlan({ ...plan, phaseSchedule: [{ phase: "bad", startOffsetMs: 0, durationMs: 100 }] })).toBeNull();
   });
 
   it("accepts complete snapshots and rejects an invalid plan facing", () => {
     const plan = {
-      protocolVersion: 1, sequence: 7, id: 7, kind: "walk", startedAtMs: 0, durationMs: 100,
+      protocolVersion: 2, sequence: 7, id: 7, kind: "walk", startedAtMs: 0, durationMs: 100,
       from: { monitorId: "primary", xLogical: 100, yLogical: 420 }, to: { monitorId: "primary", xLogical: 120, yLogical: 420 }, facing: "right",
       phaseSchedule: [{ phase: "walkCycle", startOffsetMs: 0, durationMs: 100 }],
     };
     const snapshot = {
-      protocolVersion: 1, sequence: 8, behavior: "walking",
+      protocolVersion: 2, sequence: 8, behavior: "walking",
       position: { monitorId: "primary", xLogical: 110, yLogical: 420 },
       footing: { id: "desktop", monitorId: "primary", topYLogical: 420, minXLogical: 0, maxXLogical: 500, source: "desktopWorkArea" },
+      displayMode: "aboveNormalWindows",
+      manuallyHidden: false,
+      visibilityReason: null,
       activePlan: plan,
     };
     expect(parseRuntimeSnapshot(snapshot)?.position).toEqual(snapshot.position);
+    expect(parseRuntimeSnapshot({ ...snapshot, frontendVisibility: true })).toBeNull();
     expect(parseRuntimeSnapshot({ ...snapshot, activePlan: { ...plan, facing: "up" } })).toBeNull();
     expect(parseRuntimeSnapshot(startupSnapshot)).not.toBeNull();
     expect(parseRuntimeSnapshot(invalidFacing)).toBeNull();
     expect(parseRuntimeSnapshot(m2DualMonitor)?.footing.source).toBe("foregroundWindowTop");
   });
 
-  it("M2 defaults legacy snapshots and safely hides unknown environment reasons", () => {
+  it("rejects legacy and unknown-environment snapshots", () => {
     const legacy = {
       protocolVersion: 1, sequence: 8, behavior: "idle",
       position: { monitorId: "primary", xLogical: 110, yLogical: 420 },
       footing: { id: "top", monitorId: "primary", topYLogical: 420, minXLogical: 0, maxXLogical: 500, source: "foregroundWindowTop" },
     };
-    expect(parseRuntimeSnapshot(legacy)).toMatchObject({ displayMode: "aboveNormalWindows", manuallyHidden: false, visibilityReason: null });
-    const unknown = parseRuntimeSnapshot({ ...legacy, sequence: 9, visibilityReason: "futureReason" });
-    expect(unknown?.visibilityReason).toBe("unknown");
-    expect(isRuntimeVisible(unknown ?? null)).toBe(false);
+    expect(parseRuntimeSnapshot(legacy)).toBeNull();
+    const unknown = { ...legacy, protocolVersion: 2, displayMode: "aboveNormalWindows", manuallyHidden: false, visibilityReason: "futureReason" };
+    expect(parseRuntimeSnapshot(unknown)).toBeNull();
+    expect(isRuntimeVisible(null)).toBe(true);
   });
 });

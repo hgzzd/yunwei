@@ -1,4 +1,7 @@
-use crate::model::{BehaviorState, Facing, Footing, MotionArc, MotionKind, MotionPlan, PhaseSlice, PresentationPhase, RuntimeSnapshot, WorldPoint};
+use crate::model::{
+    BehaviorState, Facing, Footing, MotionArc, MotionKind, MotionPlan, PhaseSlice,
+    PresentationPhase, RuntimeSnapshot, WorldPoint,
+};
 
 pub trait RandomSource {
     fn range(&mut self, min: u64, max: u64) -> u64;
@@ -54,7 +57,13 @@ pub struct BehaviorPlanner<R> {
 }
 
 impl<R: RandomSource> BehaviorPlanner<R> {
-    pub fn new(config: PlannerConfig, mut rng: R, position: WorldPoint, footing: Footing, now_ms: u64) -> Self {
+    pub fn new(
+        config: PlannerConfig,
+        mut rng: R,
+        position: WorldPoint,
+        footing: Footing,
+        now_ms: u64,
+    ) -> Self {
         let first_delay = rng.range(config.first_action_min_ms, config.first_action_max_ms);
         let mut planner = Self {
             config,
@@ -64,7 +73,7 @@ impl<R: RandomSource> BehaviorPlanner<R> {
             behavior: BehaviorState::Idle,
             facing: Facing::Right,
             active_plan: MotionPlan {
-                protocol_version: crate::model::M1_PROTOCOL_VERSION,
+                protocol_version: crate::model::PROTOCOL_VERSION,
                 sequence: 0,
                 id: 0,
                 kind: MotionKind::Idle,
@@ -88,7 +97,9 @@ impl<R: RandomSource> BehaviorPlanner<R> {
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Option<MotionPlan> {
-        if self.dragging { return None; }
+        if self.dragging {
+            return None;
+        }
         if self.behavior == BehaviorState::Jumping
             && now_ms.saturating_sub(self.active_plan.started_at_ms) >= 940
         {
@@ -110,9 +121,15 @@ impl<R: RandomSource> BehaviorPlanner<R> {
             self.choose_action(now_ms)
         } else {
             self.behavior = BehaviorState::Idle;
-            let mut delay = self.rng.range(self.config.action_min_ms, self.config.action_max_ms);
+            let mut delay = self
+                .rng
+                .range(self.config.action_min_ms, self.config.action_max_ms);
             if let Some(last_jump) = self.last_jump_completed_at_ms {
-                delay = delay.max(last_jump.saturating_add(self.config.jump_cooldown_ms).saturating_sub(now_ms));
+                delay = delay.max(
+                    last_jump
+                        .saturating_add(self.config.jump_cooldown_ms)
+                        .saturating_sub(now_ms),
+                );
             }
             self.previous_action_was_jump = matches!(self.active_plan.kind, MotionKind::Jump);
             self.idle_plan(now_ms, delay)
@@ -122,11 +139,21 @@ impl<R: RandomSource> BehaviorPlanner<R> {
         Some(plan)
     }
 
-    pub fn active_plan(&self) -> &MotionPlan { &self.active_plan }
-    pub fn behavior(&self) -> BehaviorState { self.behavior }
-    pub fn position(&self) -> &WorldPoint { &self.position }
-    pub fn footing(&self) -> &Footing { &self.footing }
-    pub fn next_action_due_at_ms(&self) -> u64 { self.next_action_due_at_ms }
+    pub fn active_plan(&self) -> &MotionPlan {
+        &self.active_plan
+    }
+    pub fn behavior(&self) -> BehaviorState {
+        self.behavior
+    }
+    pub fn position(&self) -> &WorldPoint {
+        &self.position
+    }
+    pub fn footing(&self) -> &Footing {
+        &self.footing
+    }
+    pub fn next_action_due_at_ms(&self) -> u64 {
+        self.next_action_due_at_ms
+    }
 
     pub fn begin_drag(&mut self, now_ms: u64) -> MotionPlan {
         self.dragging = true;
@@ -148,8 +175,16 @@ impl<R: RandomSource> BehaviorPlanner<R> {
         let from = self.position.clone();
         let to = self.footing.clamp(&from);
         let plan = self.plan(
-            MotionKind::Landing, now_ms, 560, from, to, None,
-            vec![PhaseSlice::new(PresentationPhase::LandCompress, 0, 240), PhaseSlice::new(PresentationPhase::LandRecover, 240, 320)],
+            MotionKind::Landing,
+            now_ms,
+            560,
+            from,
+            to,
+            None,
+            vec![
+                PhaseSlice::new(PresentationPhase::LandCompress, 0, 240),
+                PhaseSlice::new(PresentationPhase::LandRecover, 240, 320),
+            ],
         );
         self.next_action_due_at_ms = now_ms.saturating_add(plan.duration_ms);
         self.active_plan = plan.clone();
@@ -160,12 +195,12 @@ impl<R: RandomSource> BehaviorPlanner<R> {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
         RuntimeSnapshot {
-            protocol_version: crate::model::M1_PROTOCOL_VERSION,
+            protocol_version: crate::model::PROTOCOL_VERSION,
             sequence,
             behavior: self.behavior,
             position: self.position_at(now_ms),
             footing: self.footing.clone(),
-            active_plan: Some(self.active_plan.clone()),
+            active_plan: (self.active_plan.id > 0).then(|| self.active_plan.clone()),
             display_mode: crate::environment::DisplayMode::AboveNormalWindows,
             manually_hidden: false,
             visibility_reason: None,
@@ -204,26 +239,43 @@ impl<R: RandomSource> BehaviorPlanner<R> {
             return self.position.clone();
         }
         let plan = &self.active_plan;
-        let elapsed = now_ms.saturating_sub(plan.started_at_ms).min(plan.duration_ms);
+        let elapsed = now_ms
+            .saturating_sub(plan.started_at_ms)
+            .min(plan.duration_ms);
         if let Some(arc) = &plan.arc {
-            if elapsed <= arc.start_offset_ms { return plan.from.clone(); }
-            if elapsed >= arc.end_offset_ms { return plan.to.clone(); }
-            let t = (elapsed - arc.start_offset_ms) as f64 / (arc.end_offset_ms - arc.start_offset_ms) as f64;
+            if elapsed <= arc.start_offset_ms {
+                return plan.from.clone();
+            }
+            if elapsed >= arc.end_offset_ms {
+                return plan.to.clone();
+            }
+            let t = (elapsed - arc.start_offset_ms) as f64
+                / (arc.end_offset_ms - arc.start_offset_ms) as f64;
             let a = 1.0 - t;
             return WorldPoint::new(
                 plan.from.monitor_id.clone(),
-                a * a * plan.from.x_logical + 2.0 * a * t * arc.apex.x_logical + t * t * plan.to.x_logical,
-                a * a * plan.from.y_logical + 2.0 * a * t * arc.apex.y_logical + t * t * plan.to.y_logical,
+                a * a * plan.from.x_logical
+                    + 2.0 * a * t * arc.apex.x_logical
+                    + t * t * plan.to.x_logical,
+                a * a * plan.from.y_logical
+                    + 2.0 * a * t * arc.apex.y_logical
+                    + t * t * plan.to.y_logical,
             );
         }
         let t = elapsed as f64 / plan.duration_ms as f64;
-        WorldPoint::new(plan.from.monitor_id.clone(), plan.from.x_logical + (plan.to.x_logical - plan.from.x_logical) * t, plan.from.y_logical + (plan.to.y_logical - plan.from.y_logical) * t)
+        WorldPoint::new(
+            plan.from.monitor_id.clone(),
+            plan.from.x_logical + (plan.to.x_logical - plan.from.x_logical) * t,
+            plan.from.y_logical + (plan.to.y_logical - plan.from.y_logical) * t,
+        )
     }
 
     fn choose_action(&mut self, now_ms: u64) -> MotionPlan {
         let roll = self.rng.range(0, 99);
         let jump_allowed = !self.previous_action_was_jump
-            && self.last_jump_completed_at_ms.is_none_or(|last| now_ms.saturating_sub(last) >= self.config.jump_cooldown_ms);
+            && self
+                .last_jump_completed_at_ms
+                .is_none_or(|last| now_ms.saturating_sub(last) >= self.config.jump_cooldown_ms);
         if roll >= self.config.walk_probability_percent && jump_allowed {
             self.behavior = BehaviorState::Jumping;
             self.jump_plan(now_ms)
@@ -235,45 +287,84 @@ impl<R: RandomSource> BehaviorPlanner<R> {
 
     fn idle_plan(&mut self, now_ms: u64, duration_ms: u64) -> MotionPlan {
         self.plan(
-            MotionKind::Idle, now_ms, duration_ms, self.position.clone(), self.position.clone(), None,
+            MotionKind::Idle,
+            now_ms,
+            duration_ms,
+            self.position.clone(),
+            self.position.clone(),
+            None,
             vec![PhaseSlice::new(PresentationPhase::IdleLoop, 0, duration_ms)],
         )
     }
 
     fn walk_plan(&mut self, now_ms: u64) -> MotionPlan {
-        let duration_ms = self.rng.range(self.config.walk_min_ms, self.config.walk_max_ms);
+        let duration_ms = self
+            .rng
+            .range(self.config.walk_min_ms, self.config.walk_max_ms);
         let distance = self.config.walk_speed_logical_per_second * duration_ms as f64 / 1_000.0;
         let direction = if self.rng.range(0, 1) == 0 { 1.0 } else { -1.0 };
         let requested = WorldPoint::new(
-            self.footing.monitor_id.clone(), self.position.x_logical + direction * distance, self.footing.top_y_logical,
+            self.footing.monitor_id.clone(),
+            self.position.x_logical + direction * distance,
+            self.footing.top_y_logical,
         );
         let to = self.footing.clamp(&requested);
-        self.facing = if to.x_logical >= self.position.x_logical { Facing::Right } else { Facing::Left };
+        self.facing = if to.x_logical >= self.position.x_logical {
+            Facing::Right
+        } else {
+            Facing::Left
+        };
         self.plan(
-            MotionKind::Walk, now_ms, duration_ms, self.position.clone(), to, None,
-            vec![PhaseSlice::new(PresentationPhase::WalkCycle, 0, duration_ms)],
+            MotionKind::Walk,
+            now_ms,
+            duration_ms,
+            self.position.clone(),
+            to,
+            None,
+            vec![PhaseSlice::new(
+                PresentationPhase::WalkCycle,
+                0,
+                duration_ms,
+            )],
         )
     }
 
     fn jump_plan(&mut self, now_ms: u64) -> MotionPlan {
-        let direction = if self.facing == Facing::Right { 1.0 } else { -1.0 };
+        let direction = if self.facing == Facing::Right {
+            1.0
+        } else {
+            -1.0
+        };
         let requested = WorldPoint::new(
-            self.footing.monitor_id.clone(), self.position.x_logical + direction * self.config.jump_distance_logical, self.footing.top_y_logical,
+            self.footing.monitor_id.clone(),
+            self.position.x_logical + direction * self.config.jump_distance_logical,
+            self.footing.top_y_logical,
         );
         let mut to = self.footing.clamp(&requested);
         if (to.x_logical - self.position.x_logical).abs() < f64::EPSILON {
             to = self.footing.clamp(&WorldPoint::new(
-                self.footing.monitor_id.clone(), self.position.x_logical - direction * self.config.jump_distance_logical, self.footing.top_y_logical,
+                self.footing.monitor_id.clone(),
+                self.position.x_logical - direction * self.config.jump_distance_logical,
+                self.footing.top_y_logical,
             ));
             self.facing.reverse();
         }
         let apex = WorldPoint::new(
-            self.footing.monitor_id.clone(), (self.position.x_logical + to.x_logical) / 2.0,
+            self.footing.monitor_id.clone(),
+            (self.position.x_logical + to.x_logical) / 2.0,
             self.footing.top_y_logical - self.config.jump_height_logical,
         );
         self.plan(
-            MotionKind::Jump, now_ms, 1_500, self.position.clone(), to,
-            Some(MotionArc { apex, start_offset_ms: 220, end_offset_ms: 940 }),
+            MotionKind::Jump,
+            now_ms,
+            1_500,
+            self.position.clone(),
+            to,
+            Some(MotionArc {
+                apex,
+                start_offset_ms: 220,
+                end_offset_ms: 940,
+            }),
             vec![
                 PhaseSlice::new(PresentationPhase::JumpPrepare, 0, 220),
                 PhaseSlice::new(PresentationPhase::JumpAscend, 220, 180),
@@ -294,16 +385,29 @@ impl<R: RandomSource> BehaviorPlanner<R> {
             point.clone(),
             point,
             None,
-            vec![PhaseSlice::new(PresentationPhase::DragVisual, 0, DRAG_PLAN_DURATION_MS)],
+            vec![PhaseSlice::new(
+                PresentationPhase::DragVisual,
+                0,
+                DRAG_PLAN_DURATION_MS,
+            )],
         );
         self.next_action_due_at_ms = u64::MAX;
         self.active_plan = plan.clone();
         plan
     }
 
-    fn plan(&mut self, kind: MotionKind, started_at_ms: u64, duration_ms: u64, from: WorldPoint, to: WorldPoint, arc: Option<MotionArc>, phase_schedule: Vec<PhaseSlice>) -> MotionPlan {
+    fn plan(
+        &mut self,
+        kind: MotionKind,
+        started_at_ms: u64,
+        duration_ms: u64,
+        from: WorldPoint,
+        to: WorldPoint,
+        arc: Option<MotionArc>,
+        phase_schedule: Vec<PhaseSlice>,
+    ) -> MotionPlan {
         let plan = MotionPlan {
-            protocol_version: crate::model::M1_PROTOCOL_VERSION,
+            protocol_version: crate::model::PROTOCOL_VERSION,
             sequence: self.next_sequence,
             id: self.next_plan_id,
             kind,
@@ -365,7 +469,9 @@ mod tests {
 
     impl ScriptedRng {
         fn new(values: Vec<u64>) -> Self {
-            Self { values: values.into() }
+            Self {
+                values: values.into(),
+            }
         }
     }
 
@@ -432,9 +538,47 @@ mod tests {
     }
 
     #[test]
+    fn startup_snapshot_contains_only_a_valid_versioned_plan() {
+        let footing = Footing {
+            id: "desktop".into(),
+            monitor_id: "primary".into(),
+            top_y_logical: 420.0,
+            min_x_logical: 0.0,
+            max_x_logical: 500.0,
+            source: FootingSource::DesktopWorkArea,
+        };
+        let mut planner = BehaviorPlanner::new(
+            PlannerConfig::default(),
+            ScriptedRng::new(vec![8_000]),
+            WorldPoint::new("primary", 100.0, 420.0),
+            footing,
+            0,
+        );
+        let snapshot = planner.runtime_snapshot(0);
+        assert!(snapshot
+            .active_plan
+            .as_ref()
+            .is_some_and(|plan| plan.sequence > 0 && plan.id > 0));
+        assert!(snapshot.validate().is_ok());
+    }
+
+    #[test]
     fn drag_end_uses_the_planner_position_and_snapshots_sample_live_position() {
-        let footing = Footing { id: "desktop".into(), monitor_id: "primary".into(), top_y_logical: 420.0, min_x_logical: 0.0, max_x_logical: 500.0, source: FootingSource::DesktopWorkArea };
-        let mut planner = BehaviorPlanner::new(PlannerConfig::default(), ScriptedRng::new(vec![8_000]), WorldPoint::new("primary", 100.0, 420.0), footing.clone(), 0);
+        let footing = Footing {
+            id: "desktop".into(),
+            monitor_id: "primary".into(),
+            top_y_logical: 420.0,
+            min_x_logical: 0.0,
+            max_x_logical: 500.0,
+            source: FootingSource::DesktopWorkArea,
+        };
+        let mut planner = BehaviorPlanner::new(
+            PlannerConfig::default(),
+            ScriptedRng::new(vec![8_000]),
+            WorldPoint::new("primary", 100.0, 420.0),
+            footing.clone(),
+            0,
+        );
         planner.begin_drag(100);
         planner.drag_to(110, WorldPoint::new("primary", 640.0, 200.0));
         let landing = planner.land_after_drag(120);
@@ -446,5 +590,4 @@ mod tests {
         assert_eq!(snapshot.position, planner.position_at(240));
         assert!(snapshot.validate().is_ok());
     }
-
 }
